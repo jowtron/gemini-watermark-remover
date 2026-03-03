@@ -169,6 +169,29 @@ const websiteCtx = await esbuild.context({
   plugins: [copyAssetsPlugin],
 });
 
+// Build website worker
+const workerCtx = await esbuild.context({
+  ...commonConfig,
+  entryPoints: ['src/workers/watermarkWorker.js'],
+  outfile: 'dist/workers/watermark-worker.js',
+  platform: 'browser',
+  format: 'esm',
+  target: ['es2020'],
+  sourcemap: !isProd,
+});
+
+// Build inline worker code for userscript (Blob Worker)
+const userscriptWorkerBuild = await esbuild.build({
+  ...commonConfig,
+  entryPoints: ['src/workers/watermarkWorker.js'],
+  format: 'iife',
+  platform: 'browser',
+  target: ['es2020'],
+  write: false,
+  sourcemap: false,
+});
+const userscriptWorkerCode = userscriptWorkerBuild.outputFiles?.[0]?.text || '';
+
 // Build userscript
 const userscriptCtx = await esbuild.context({
   ...commonConfig,
@@ -176,20 +199,24 @@ const userscriptCtx = await esbuild.context({
   format: 'iife',
   outfile: 'dist/userscript/gemini-watermark-remover.user.js',
   banner: { js: userscriptBanner },
-  minify: false
+  minify: false,
+  define: {
+    __US_WORKER_CODE__: JSON.stringify(userscriptWorkerCode)
+  }
 });
 
 console.log(`🚀 Starting build process... [${isProd ? 'PRODUCTION' : 'DEVELOPMENT'}]`);
 
 if (existsSync('dist')) rmSync('dist', { recursive: true });
 mkdirSync('dist/userscript', { recursive: true });
+mkdirSync('dist/workers', { recursive: true });
   
 if (isProd) {
-  await Promise.all([websiteCtx.rebuild(), userscriptCtx.rebuild()]);
+  await Promise.all([websiteCtx.rebuild(), workerCtx.rebuild(), userscriptCtx.rebuild()]);
   console.log('✅ Build complete!');
   process.exit(0);
 } else {
-  await Promise.all([websiteCtx.watch(), userscriptCtx.watch()]);
+  await Promise.all([websiteCtx.watch(), workerCtx.watch(), userscriptCtx.watch()]);
 
   const watchDir = (dir, dest) => {
     let debounceTimer = null;

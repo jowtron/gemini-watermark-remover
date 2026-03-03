@@ -122,6 +122,35 @@ test('removeWatermark should recover low-but-real alpha edge pixels', () => {
     assert.ok(Math.abs(recovered - before) <= 2, `recovered=${recovered}, before=${before}`);
 });
 
+test('removeWatermark should support alpha gain for stronger watermark variants', () => {
+    const width = 80;
+    const height = 80;
+    const position = { x: 16, y: 16, width: 32, height: 32 };
+    const imageData = createFlatImageData(width, height, 80);
+
+    // Template alpha is weaker than real-world watermark alpha.
+    const templateAlpha = 0.18;
+    const trueAlpha = 0.36;
+    const alphaMap = new Float32Array(position.width * position.height).fill(templateAlpha);
+
+    // Simulate a stronger watermark blend first.
+    for (let row = 0; row < position.height; row++) {
+        for (let col = 0; col < position.width; col++) {
+            const idx = ((position.y + row) * width + (position.x + col)) * 4;
+            const watermarked = Math.round(trueAlpha * 255 + (1 - trueAlpha) * 80);
+            imageData.data[idx] = watermarked;
+            imageData.data[idx + 1] = watermarked;
+            imageData.data[idx + 2] = watermarked;
+        }
+    }
+
+    // Requires gain-aware inverse solve to recover.
+    removeWatermark(imageData, alphaMap, position, { alphaGain: 2 });
+
+    const sampleIdx = ((position.y + 10) * width + (position.x + 10)) * 4;
+    assert.ok(Math.abs(imageData.data[sampleIdx] - 80) <= 2, `recovered=${imageData.data[sampleIdx]}`);
+});
+
 test('removeWatermark should suppress residual watermark shape on structured alpha map', () => {
     const width = 240;
     const height = 200;

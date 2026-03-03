@@ -1,4 +1,9 @@
-import { WatermarkEngine } from './core/watermarkEngine.js';
+import {
+    WatermarkEngine,
+    detectWatermarkConfig,
+    calculateWatermarkPosition
+} from './core/watermarkEngine.js';
+import { WatermarkWorkerClient, canUseWatermarkWorker } from './core/workerClient.js';
 import { resolveDisplayWatermarkInfo } from './core/watermarkDisplay.js';
 import i18n from './i18n.js';
 import {
@@ -14,7 +19,8 @@ import JSZip from 'jszip';
 import mediumZoom from 'medium-zoom';
 
 // global state
-let engine = null;
+let enginePromise = null;
+let workerClient = null;
 let imageQueue = [];
 let processedCount = 0;
 let zoom = null;
@@ -35,6 +41,35 @@ const downloadBtn = document.getElementById('downloadBtn');
 const copyBtn = document.getElementById('copyBtn');
 const resetBtn = document.getElementById('resetBtn');
 
+async function getEngine() {
+    if (!enginePromise) {
+        enginePromise = WatermarkEngine.create().catch((error) => {
+            enginePromise = null;
+            throw error;
+        });
+    }
+    return enginePromise;
+}
+
+function getEstimatedWatermarkInfo(item) {
+    if (!item?.originalImg) return null;
+    const { width, height } = item.originalImg;
+    const config = detectWatermarkConfig(width, height);
+    const position = calculateWatermarkPosition(width, height, config);
+    return {
+        size: config.logoSize,
+        position,
+        config
+    };
+}
+
+function disableWorkerClient(reason) {
+    if (!workerClient) return;
+    console.warn('disable worker path, fallback to main thread:', reason);
+    workerClient.dispose();
+    workerClient = null;
+}
+
 /**
  * initialize the application
  */
@@ -45,7 +80,21 @@ async function init() {
         setupDarkMode();
         showLoading(i18n.t('status.loading'));
 
-        engine = await WatermarkEngine.create();
+        if (canUseWatermarkWorker()) {
+            try {
+                workerClient = new WatermarkWorkerClient({
+                    workerUrl: './workers/watermark-worker.js'
+                });
+            } catch (workerError) {
+                console.warn('worker unavailable, fallback to main thread:', workerError);
+                workerClient = null;
+            }
+        }
+        if (!workerClient) {
+            getEngine().catch((error) => {
+                console.warn('main thread engine warmup failed:', error);
+            });
+        }
 
         hideLoading();
         setupEventListeners();
@@ -119,6 +168,9 @@ function setupEventListeners() {
 
     downloadAllBtn.addEventListener('click', downloadAll);
     resetBtn.addEventListener('click', reset);
+    window.addEventListener('beforeunload', () => {
+        disableWorkerClient('beforeunload');
+    });
 }
 
 function reset() {
@@ -184,11 +236,11 @@ function handleFiles(files) {
 }
 
 function renderSingleImageMeta(item) {
-    if (!item?.originalImg || !engine) return;
+    if (!item?.originalImg) return;
 
     const watermarkInfo = resolveDisplayWatermarkInfo(
         item,
-        engine.getWatermarkInfo(item.originalImg.width, item.originalImg.height)
+        getEstimatedWatermarkInfo(item)
     );
     if (!watermarkInfo) return;
 
@@ -200,11 +252,11 @@ function renderSingleImageMeta(item) {
 }
 
 function renderSingleProcessedMeta(item) {
-    if (!item?.originalImg || !engine) return;
+    if (!item?.originalImg) return;
 
     const watermarkInfo = resolveDisplayWatermarkInfo(
         item,
-        engine.getWatermarkInfo(item.originalImg.width, item.originalImg.height)
+        getEstimatedWatermarkInfo(item)
     );
 
     processedInfo.innerHTML = `
@@ -233,11 +285,11 @@ function renderImageCardStatus(item) {
         return;
     }
 
-    if (item.status !== 'completed' || !item.originalImg || !engine) return;
+    if (item.status !== 'completed' || !item.originalImg) return;
 
     const watermarkInfo = resolveDisplayWatermarkInfo(
         item,
-        engine.getWatermarkInfo(item.originalImg.width, item.originalImg.height)
+        getEstimatedWatermarkInfo(item)
     );
     if (!watermarkInfo) return;
 
@@ -265,17 +317,16 @@ async function processSingle(item) {
         originalImage.src = img.src;
         renderSingleImageMeta(item);
 
-        const result = await engine.removeWatermarkFromImage(img);
-        item.processedMeta = result.__watermarkMeta || null;
+        const processed = await processImageWithBestPath(item.file, img);
+        item.processedMeta = processed.meta;
         item.validation = resolveOriginalValidation(item.validation, item.processedMeta);
         const resolvedStatus = getOriginalStatus(item.validation);
         setStatusMessage(resolvedStatus, item.validation.is_google ? 'success' : 'warn');
 
         renderSingleImageMeta(item);
-        const blob = await new Promise(resolve => result.toBlob(resolve, 'image/png'));
-        item.processedBlob = blob;
+        item.processedBlob = processed.blob;
 
-        item.processedUrl = URL.createObjectURL(blob);
+        item.processedUrl = URL.createObjectURL(processed.blob);
         processedImage.src = item.processedUrl;
         const overlay = document.getElementById('processedOverlay');
         const handle = document.getElementById('sliderHandle');
@@ -344,12 +395,11 @@ async function processQueue() {
             renderImageCardStatus(item);
 
             try {
-                const result = await engine.removeWatermarkFromImage(item.originalImg);
-                item.processedMeta = result.__watermarkMeta || null;
-                const blob = await new Promise(resolve => result.toBlob(resolve, 'image/png'));
-                item.processedBlob = blob;
+                const processed = await processImageWithBestPath(item.file, item.originalImg);
+                item.processedMeta = processed.meta;
+                item.processedBlob = processed.blob;
 
-                item.processedUrl = URL.createObjectURL(blob);
+                item.processedUrl = URL.createObjectURL(processed.blob);
                 document.getElementById(`result-${item.id}`).src = item.processedUrl;
 
                 item.status = 'completed';
@@ -381,6 +431,25 @@ async function processQueue() {
     if (processedCount > 0) {
         downloadAllBtn.style.display = 'flex';
     }
+}
+
+async function processImageWithBestPath(file, fallbackImage, options = {}) {
+    if (workerClient) {
+        try {
+            return await workerClient.processBlob(file, options);
+        } catch (error) {
+            console.warn('worker process failed, fallback to main thread:', error);
+            disableWorkerClient(error);
+        }
+    }
+
+    const engine = await getEngine();
+    const canvas = await engine.removeWatermarkFromImage(fallbackImage, options);
+    const blob = await canvasToBlob(canvas);
+    return {
+        blob,
+        meta: canvas.__watermarkMeta || null
+    };
 }
 
 function updateStatus(id, text, isHtml = false) {
