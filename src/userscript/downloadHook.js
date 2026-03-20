@@ -121,9 +121,10 @@ export function createGeminiDownloadFetchHook({
             normalizedUrl,
             response
           }))
-          .catch((error) => {
-            cache.delete(normalizedUrl);
-            throw error;
+          .finally(() => {
+            if (cache.get(normalizedUrl) === pendingBlob) {
+              cache.delete(normalizedUrl);
+            }
           });
         cache.set(normalizedUrl, pendingBlob);
       }

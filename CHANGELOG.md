@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.0.2 - 2026-03-20
+
+### Userscript
+
+- Simplified Gemini page-image replacement into smaller shared helpers for processing preparation, mutation routing, source dispatch, and result application.
+- Simplified Gemini original-blob acquisition so preview urls use rendered capture, download urls use background fetch, and inline urls stay on direct fetch.
+- Simplified Gemini download interception to keep only in-flight request deduplication instead of retaining processed response cache entries.
+
+### Quality
+
+- Added focused regression coverage for preview/original source dispatch, candidate image collection, mutation scheduling, and self-written processed blob detection.
+- Re-verified the release with full automated tests and a fresh production build.
+
 ## 1.0.1 - 2026-03-19
 
 ### Userscript

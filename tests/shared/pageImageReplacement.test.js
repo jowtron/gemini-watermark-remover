@@ -2,17 +2,26 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  buildPageImageSourceRequest,
+  collectCandidateImages,
   createRootBatchProcessor,
   buildPreviewReplacementCandidates,
+  createPageImageReplacementController,
+  emitPageImageProcessingStart,
+  handlePageImageMutations,
+  handlePageImageProcessingFailure,
+  isSelfWrittenProcessedImageSource,
+  preparePageImageProcessing,
+  processPageImageSource,
+  processOriginalPageImageSource,
+  processPreviewPageImageSource,
+  applyPageImageProcessingResult,
   fetchBlobFromBackground,
   hideProcessingOverlay,
-  inferImageMimeTypeFromBytes,
   intersectCaptureRectWithViewport,
-  requestVisibleTabCapture,
   resolvePreviewReplacementResult,
   resolveVisibleCaptureRect,
   shouldSkipPreviewProcessingFailure,
-  shouldRetryVisibleCaptureError,
   shouldScheduleAttributeMutation,
   shouldScheduleMutationRoot,
   showProcessingOverlay,
@@ -41,6 +50,54 @@ function createMockElement(tagName = 'div') {
       return child;
     }
   };
+}
+
+function createSilentLogger() {
+  return {
+    info() {},
+    warn() {}
+  };
+}
+
+async function withPageImageTestEnv(run) {
+  const originalDocument = globalThis.document;
+  const originalHTMLImageElement = globalThis.HTMLImageElement;
+  const originalURL = globalThis.URL;
+  const originalCreateObjectURL = globalThis.URL?.createObjectURL;
+  const originalRevokeObjectURL = globalThis.URL?.revokeObjectURL;
+  const originalSetTimeout = globalThis.setTimeout;
+  const originalClearTimeout = globalThis.clearTimeout;
+
+  class MockHTMLImageElement {}
+
+  globalThis.document = {
+    createElement(tagName) {
+      return createMockElement(tagName);
+    }
+  };
+  globalThis.HTMLImageElement = MockHTMLImageElement;
+  globalThis.URL = originalURL;
+  globalThis.URL.createObjectURL = (blob) => `blob:mock:${blob.size}`;
+  globalThis.URL.revokeObjectURL = () => {};
+  globalThis.setTimeout = (callback) => {
+    callback();
+    return 1;
+  };
+  globalThis.clearTimeout = () => {};
+
+  try {
+    await run({ MockHTMLImageElement });
+  } finally {
+    globalThis.document = originalDocument;
+    globalThis.HTMLImageElement = originalHTMLImageElement;
+    globalThis.URL = originalURL;
+    if (globalThis.URL) {
+      globalThis.URL.createObjectURL = originalCreateObjectURL;
+      globalThis.URL.revokeObjectURL = originalRevokeObjectURL;
+    }
+    globalThis.setTimeout = originalSetTimeout;
+    globalThis.clearTimeout = originalClearTimeout;
+  }
 }
 
 test('resolveVisibleCaptureRect should prefer Gemini container rect when image rect is too small', () => {
@@ -176,38 +233,19 @@ test('intersectCaptureRectWithViewport should clip target rect to visible viewpo
   );
 });
 
-test('inferImageMimeTypeFromBytes should detect common image signatures', () => {
-  assert.equal(
-    inferImageMimeTypeFromBytes(new Uint8Array([0x89, 0x50, 0x4E, 0x47, 0, 0, 0, 0, 0, 0, 0, 0])),
-    'image/png'
-  );
-  assert.equal(
-    inferImageMimeTypeFromBytes(new Uint8Array([0xFF, 0xD8, 0xFF, 0xEE, 0, 0, 0, 0, 0, 0, 0, 0])),
-    'image/jpeg'
-  );
-  assert.equal(
-    inferImageMimeTypeFromBytes(new Uint8Array([0x52, 0x49, 0x46, 0x46, 1, 2, 3, 4, 0x57, 0x45, 0x42, 0x50])),
-    'image/webp'
-  );
-  assert.equal(
-    inferImageMimeTypeFromBytes(new Uint8Array([0, 0, 0, 24, 0x66, 0x74, 0x79, 0x70, 0x61, 0x76, 0x69, 0x66])),
-    'image/avif'
-  );
-});
-
 test('resolvePreviewReplacementResult should skip insufficient preview candidates and choose a confirmed one', async () => {
-  const visibleBlob = new Blob(['visible'], { type: 'image/png' });
+  const pageBlob = new Blob(['page'], { type: 'image/png' });
   const renderedBlob = new Blob(['rendered'], { type: 'image/png' });
 
   const result = await resolvePreviewReplacementResult({
     candidates: [
-      { strategy: 'visible-capture' },
+      { strategy: 'page-fetch' },
       { strategy: 'rendered-capture' }
     ],
     processCandidate: async (candidate) => {
-      if (candidate.strategy === 'visible-capture') {
+      if (candidate.strategy === 'page-fetch') {
         return {
-          processedBlob: visibleBlob,
+          processedBlob: pageBlob,
           processedMeta: {
             applied: false
           }
@@ -249,13 +287,13 @@ test('resolvePreviewReplacementResult should allow rendered capture as a safe fa
 
   const result = await resolvePreviewReplacementResult({
     candidates: [
-      { strategy: 'visible-capture' },
+      { strategy: 'page-fetch' },
       { strategy: 'rendered-capture' }
     ],
     processCandidate: async (candidate) => {
-      if (candidate.strategy === 'visible-capture') {
+      if (candidate.strategy === 'page-fetch') {
         return {
-          processedBlob: new Blob(['visible'], { type: 'image/png' }),
+          processedBlob: new Blob(['page'], { type: 'image/png' }),
           processedMeta: {
             applied: false
           }
@@ -279,7 +317,7 @@ test('resolvePreviewReplacementResult should throw when every preview candidate 
   await assert.rejects(
     () => resolvePreviewReplacementResult({
       candidates: [
-        { strategy: 'visible-capture' }
+        { strategy: 'page-fetch' }
       ],
       processCandidate: async () => ({
         processedBlob: new Blob(['noop'], { type: 'image/png' }),
@@ -293,20 +331,20 @@ test('resolvePreviewReplacementResult should throw when every preview candidate 
 });
 
 test('resolvePreviewReplacementResult should not accept visible capture only because the blob is large', async () => {
-  const largeVisibleBlob = new Blob([new Uint8Array(160 * 1024)], { type: 'image/png' });
+  const largePageBlob = new Blob([new Uint8Array(160 * 1024)], { type: 'image/png' });
 
   await assert.rejects(
     () => resolvePreviewReplacementResult({
       candidates: [
-        { strategy: 'visible-capture' }
+        { strategy: 'page-fetch' }
       ],
       processCandidate: async () => ({
-        processedBlob: largeVisibleBlob,
+        processedBlob: largePageBlob,
         processedMeta: {
           applied: false
         },
         sourceBlobType: 'image/png',
-        sourceBlobSize: largeVisibleBlob.size
+        sourceBlobSize: largePageBlob.size
       })
     }),
     /No confirmed Gemini preview candidate succeeded/
@@ -318,13 +356,13 @@ test('resolvePreviewReplacementResult should surface safe fallback errors instea
     async () => {
       await resolvePreviewReplacementResult({
         candidates: [
-          { strategy: 'visible-capture' },
+          { strategy: 'page-fetch' },
           { strategy: 'rendered-capture' }
         ],
         processCandidate: async (candidate) => {
-          if (candidate.strategy === 'visible-capture') {
+          if (candidate.strategy === 'page-fetch') {
             return {
-              processedBlob: new Blob(['visible'], { type: 'image/png' }),
+              processedBlob: new Blob(['page'], { type: 'image/png' }),
               processedMeta: {
                 applied: false
               }
@@ -339,44 +377,32 @@ test('resolvePreviewReplacementResult should surface safe fallback errors instea
   );
 });
 
-test('resolvePreviewReplacementResult should allow visible capture as a last resort when stronger preview candidates fail', async () => {
-  const visibleBlob = new Blob(['visible'], { type: 'image/png' });
+test('resolvePreviewReplacementResult should return rendered fallback when page-fetch fails but rendered capture still produces a blob', async () => {
+  const renderedBlob = new Blob(['rendered'], { type: 'image/png' });
 
   const result = await resolvePreviewReplacementResult({
     candidates: [
-      { strategy: 'background-fetch' },
       { strategy: 'page-fetch' },
-      { strategy: 'visible-capture' },
       { strategy: 'rendered-capture' }
     ],
     processCandidate: async (candidate) => {
-      if (candidate.strategy === 'visible-capture') {
-        return {
-          processedBlob: visibleBlob,
-          processedMeta: {
-            applied: false
-          },
-          sourceBlobType: 'image/png',
-          sourceBlobSize: visibleBlob.size
-        };
-      }
-
-      if (candidate.strategy === 'background-fetch') {
-        throw new Error('Failed to decode Gemini image blob');
-      }
-
       if (candidate.strategy === 'page-fetch') {
         throw new Error('Failed to fetch');
       }
 
-      throw new Error("Failed to execute 'toBlob' on 'HTMLCanvasElement': Tainted canvases may not be exported.");
+      return {
+        processedBlob: renderedBlob,
+        processedMeta: {
+          applied: false
+        }
+      };
     }
   });
 
-  assert.equal(result.strategy, 'visible-capture');
-  assert.equal(result.processedBlob, visibleBlob);
-  assert.match(result.diagnosticsSummary, /background-fetch,error/);
-  assert.match(result.diagnosticsSummary, /visible-capture,insufficient/);
+  assert.equal(result.strategy, 'rendered-capture');
+  assert.equal(result.processedBlob, renderedBlob);
+  assert.match(result.diagnosticsSummary, /page-fetch,error/);
+  assert.match(result.diagnosticsSummary, /rendered-capture,insufficient/);
 });
 
 test('resolvePreviewReplacementResult should include source blob metadata for candidate errors', async () => {
@@ -384,7 +410,7 @@ test('resolvePreviewReplacementResult should include source blob metadata for ca
     async () => {
       await resolvePreviewReplacementResult({
         candidates: [
-          { strategy: 'background-fetch' }
+          { strategy: 'page-fetch' }
         ],
         processCandidate: async () => {
           const error = new Error('Failed to decode Gemini image blob');
@@ -395,7 +421,7 @@ test('resolvePreviewReplacementResult should include source blob metadata for ca
       });
     },
     (error) => {
-      assert.equal(error?.candidateDiagnostics?.[0]?.strategy, 'background-fetch');
+      assert.equal(error?.candidateDiagnostics?.[0]?.strategy, 'page-fetch');
       assert.equal(error?.candidateDiagnostics?.[0]?.sourceBlobType, 'image/heic');
       assert.equal(error?.candidateDiagnostics?.[0]?.sourceBlobSize, 245760);
       assert.match(error?.candidateDiagnosticsSummary || '', /sourceType=image\/heic/);
@@ -413,7 +439,6 @@ test('buildPreviewReplacementCandidates should prefer page fetch bridge for prev
   const candidates = buildPreviewReplacementCandidates({
     imageElement: image,
     sourceUrl,
-    sendRuntimeMessage: null,
     captureRenderedImageBlob: async (targetImage) => {
       assert.equal(targetImage, image);
       return renderedBlob;
@@ -427,24 +452,16 @@ test('buildPreviewReplacementCandidates should prefer page fetch bridge for prev
   assert.equal(await candidates[1].getOriginalBlob(), renderedBlob);
 });
 
-test('buildPreviewReplacementCandidates should prefer background fetch and avoid page fetch and visible capture when runtime messaging is available', async () => {
+test('buildPreviewReplacementCandidates should prefer page fetch whenever preview fetching is available', async () => {
   const image = { id: 'fixture-image' };
   const sourceUrl = 'https://lh3.googleusercontent.com/gg/example-token=s1024-rj';
   const normalizedSourceUrl = 'https://lh3.googleusercontent.com/gg/example-token=s0-rj';
   const renderedBlob = new Blob(['rendered'], { type: 'image/png' });
-  const runtimeMessages = [];
+  const pageFetchedBlob = new Blob(['page-fetch'], { type: 'image/webp' });
 
   const candidates = buildPreviewReplacementCandidates({
     imageElement: image,
     sourceUrl,
-    sendRuntimeMessage: async (message) => {
-      runtimeMessages.push(message);
-      return {
-        ok: true,
-        buffer: new TextEncoder().encode('background-fetch').buffer,
-        mimeType: 'image/webp'
-      };
-    },
     fetchPreviewBlob: async (url) => {
       assert.equal(url, normalizedSourceUrl);
       return pageFetchedBlob;
@@ -457,51 +474,594 @@ test('buildPreviewReplacementCandidates should prefer background fetch and avoid
 
   assert.deepEqual(
     candidates.map((candidate) => candidate.strategy),
-    ['background-fetch', 'rendered-capture']
+    ['page-fetch', 'rendered-capture']
   );
-  const backgroundBlob = await candidates[0].getOriginalBlob();
-  assert.equal(backgroundBlob.type, 'image/webp');
-  assert.equal(
-    new TextDecoder().decode(await backgroundBlob.arrayBuffer()),
-    'background-fetch'
-  );
-  assert.deepEqual(runtimeMessages, [{
-    type: 'gwr:fetch-image',
-    url: normalizedSourceUrl
-  }]);
+  assert.equal(await candidates[0].getOriginalBlob(), pageFetchedBlob);
   assert.equal(await candidates[1].getOriginalBlob(), renderedBlob);
 });
 
-test('buildPreviewReplacementCandidates should still prefer background fetch and skip page fetch and visible capture when using the default page bridge', async () => {
+test('buildPreviewReplacementCandidates should only keep rendered capture when preview fetching is omitted', async () => {
   const sourceUrl = 'https://lh3.googleusercontent.com/gg/example-token=s1024-rj';
-  const normalizedSourceUrl = 'https://lh3.googleusercontent.com/gg/example-token=s0-rj';
-  const runtimeMessages = [];
 
   const candidates = buildPreviewReplacementCandidates({
     imageElement: { id: 'fixture-image' },
     sourceUrl,
-    sendRuntimeMessage: async (message) => {
-      runtimeMessages.push(message);
-      return {
-        ok: true,
-        buffer: new TextEncoder().encode('background-fetch').buffer,
-        mimeType: 'image/png'
-      };
-    },
+    fetchPreviewBlob: null,
     captureRenderedImageBlob: async () => new Blob(['rendered'], { type: 'image/png' })
   });
 
   assert.deepEqual(
     candidates.map((candidate) => candidate.strategy),
-    ['background-fetch', 'rendered-capture']
+    ['rendered-capture']
+  );
+});
+
+test('fetchBlobFromBackground should use provided fallback fetcher with the simplified signature', async () => {
+  const fetchedBlob = new Blob(['gm-fetch'], { type: 'image/webp' });
+  const calls = [];
+
+  const blob = await fetchBlobFromBackground(
+    'https://lh3.googleusercontent.com/gg-dl/example-token=s0-rj',
+    async (url) => {
+      calls.push(url);
+      return fetchedBlob;
+    }
   );
 
-  await candidates[0].getOriginalBlob();
+  assert.equal(blob, fetchedBlob);
+  assert.deepEqual(calls, [
+    'https://lh3.googleusercontent.com/gg-dl/example-token=s0-rj'
+  ]);
+});
 
-  assert.deepEqual(runtimeMessages, [{
-    type: 'gwr:fetch-image',
-    url: normalizedSourceUrl
-  }]);
+test('processPageImageSource should process preview candidates and return selected strategy diagnostics', async () => {
+  const sourceUrl = 'https://lh3.googleusercontent.com/gg/example-token=s1024-rj';
+  const imageElement = { id: 'fixture-image' };
+  const originalBlob = new Blob(['page-fetch'], { type: 'image/webp' });
+  const processedBlob = new Blob(['processed'], { type: 'image/png' });
+
+  const result = await processPageImageSource({
+    sourceUrl,
+    imageElement,
+    fetchPreviewBlob: async (url) => {
+      assert.equal(url, 'https://lh3.googleusercontent.com/gg/example-token=s0-rj');
+      return originalBlob;
+    },
+    captureRenderedImageBlob: async () => {
+      throw new Error('rendered capture should not be used');
+    },
+    processWatermarkBlobImpl: async (blob) => {
+      assert.equal(blob, originalBlob);
+      return {
+        processedBlob,
+        processedMeta: {
+          applied: true,
+          size: 96,
+          position: {
+            width: 96,
+            height: 96
+          },
+          source: 'validated-standard',
+          detection: {
+            originalSpatialScore: 0.36,
+            processedSpatialScore: 0.08,
+            suppressionGain: 0.42
+          }
+        }
+      };
+    }
+  });
+
+  assert.equal(result.skipped, false);
+  assert.equal(result.processedBlob, processedBlob);
+  assert.equal(result.selectedStrategy, 'page-fetch');
+  assert.equal(result.candidateDiagnostics?.[0]?.strategy, 'page-fetch');
+});
+
+test('processPageImageSource should return skipped preview result when page fetch is forbidden and rendered capture is tainted', async () => {
+  const sourceUrl = 'https://lh3.googleusercontent.com/gg/example-token=s1024-rj';
+
+  const result = await processPageImageSource({
+    sourceUrl,
+    imageElement: { id: 'fixture-image' },
+    fetchPreviewBlob: async () => {
+      throw new Error('Failed to fetch image: 403');
+    },
+    captureRenderedImageBlob: async () => {
+      const error = new Error("Failed to execute 'toBlob' on 'HTMLCanvasElement': Tainted canvases may not be exported.");
+      error.name = 'SecurityError';
+      throw error;
+    },
+    processWatermarkBlobImpl: async () => {
+      throw new Error('preview processing should not run');
+    }
+  });
+
+  assert.equal(result.skipped, true);
+  assert.equal(result.reason, 'preview-fetch-unavailable');
+  assert.match(result.candidateDiagnosticsSummary || '', /page-fetch,error/);
+  assert.match(result.candidateDiagnosticsSummary || '', /rendered-capture,error/);
+});
+
+test('processPreviewPageImageSource should return confirmed preview candidate result', async () => {
+  const originalBlob = new Blob(['page-fetch'], { type: 'image/webp' });
+  const processedBlob = new Blob(['processed'], { type: 'image/png' });
+
+  const result = await processPreviewPageImageSource({
+    sourceUrl: 'https://lh3.googleusercontent.com/gg/example-token=s1024-rj',
+    imageElement: { id: 'fixture-image' },
+    fetchPreviewBlob: async () => originalBlob,
+    captureRenderedImageBlob: async () => {
+      throw new Error('rendered capture should not run');
+    },
+    processWatermarkBlobImpl: async (blob) => {
+      assert.equal(blob, originalBlob);
+      return {
+        processedBlob,
+        processedMeta: {
+          applied: true,
+          size: 96,
+          position: { width: 96, height: 96 },
+          source: 'validated-standard',
+          detection: {
+            originalSpatialScore: 0.36,
+            processedSpatialScore: 0.08,
+            suppressionGain: 0.42
+          }
+        }
+      };
+    }
+  });
+
+  assert.equal(result.skipped, false);
+  assert.equal(result.processedBlob, processedBlob);
+  assert.equal(result.selectedStrategy, 'page-fetch');
+});
+
+test('processOriginalPageImageSource should acquire original blob and remove watermark', async () => {
+  const originalBlob = new Blob(['original'], { type: 'image/jpeg' });
+  const processedBlob = new Blob(['processed'], { type: 'image/png' });
+
+  const result = await processOriginalPageImageSource({
+    sourceUrl: 'https://lh3.googleusercontent.com/gg-dl/example-token=s1024-rj',
+    imageElement: { id: 'fixture-image' },
+    fetchPreviewBlob: async () => {
+      throw new Error('preview fetch should not run directly');
+    },
+    fetchBlobFromBackgroundImpl: async (url, fallbackFetchBlob) => {
+      assert.equal(url, 'https://lh3.googleusercontent.com/gg-dl/example-token=s0-rj');
+      assert.equal(typeof fallbackFetchBlob, 'function');
+      return originalBlob;
+    },
+    fetchBlobDirectImpl: async () => {
+      throw new Error('direct fetch should not run');
+    },
+    captureRenderedImageBlob: async () => {
+      throw new Error('rendered capture should not run');
+    },
+    validateBlob: async () => ({ width: 1, height: 1 }),
+    removeWatermarkFromBlobImpl: async (blob) => {
+      assert.equal(blob, originalBlob);
+      return processedBlob;
+    }
+  });
+
+  assert.equal(result.skipped, false);
+  assert.equal(result.processedBlob, processedBlob);
+  assert.equal(result.selectedStrategy, '');
+  assert.equal(result.candidateDiagnostics, null);
+});
+
+test('collectCandidateImages should include a processable root image and dedupe descendants', async () => {
+  await withPageImageTestEnv(async ({ MockHTMLImageElement }) => {
+    const container = {};
+    const rootImage = new MockHTMLImageElement();
+    rootImage.dataset = {
+      gwrSourceUrl: 'https://lh3.googleusercontent.com/gg/example-token=s1024-rj'
+    };
+    rootImage.src = rootImage.dataset.gwrSourceUrl;
+    rootImage.currentSrc = rootImage.src;
+    rootImage.closest = (selector) => selector === 'generated-image,.generated-image-container'
+      ? container
+      : null;
+    rootImage.querySelectorAll = () => [rootImage];
+
+    const candidates = collectCandidateImages(rootImage);
+
+    assert.deepEqual(candidates, [rootImage]);
+  });
+});
+
+test('collectCandidateImages should collect processable descendant images only once', async () => {
+  await withPageImageTestEnv(async ({ MockHTMLImageElement }) => {
+    const container = {};
+    const imageA = new MockHTMLImageElement();
+    imageA.dataset = {
+      gwrSourceUrl: 'https://lh3.googleusercontent.com/gg/example-a=s1024-rj'
+    };
+    imageA.src = imageA.dataset.gwrSourceUrl;
+    imageA.currentSrc = imageA.src;
+    imageA.closest = (selector) => selector === 'generated-image,.generated-image-container'
+      ? container
+      : null;
+
+    const imageB = new MockHTMLImageElement();
+    imageB.dataset = {
+      gwrSourceUrl: 'https://lh3.googleusercontent.com/gg/example-b=s1024-rj'
+    };
+    imageB.src = imageB.dataset.gwrSourceUrl;
+    imageB.currentSrc = imageB.src;
+    imageB.closest = (selector) => selector === 'generated-image,.generated-image-container'
+      ? container
+      : null;
+
+    const root = {
+      querySelectorAll() {
+        return [imageA, imageA, imageB];
+      }
+    };
+
+    const candidates = collectCandidateImages(root);
+
+    assert.deepEqual(candidates, [imageA, imageB]);
+  });
+});
+
+test('preparePageImageProcessing should skip ready image with unchanged source', async () => {
+  await withPageImageTestEnv(async ({ MockHTMLImageElement }) => {
+    const image = new MockHTMLImageElement();
+    image.dataset = {
+      gwrPageImageSource: 'https://lh3.googleusercontent.com/gg/example-token=s1024-rj',
+      gwrPageImageState: 'ready'
+    };
+    image.style = {};
+
+    const processing = new Set();
+    let overlayCalls = 0;
+
+    const result = preparePageImageProcessing(image, {
+      processing,
+      HTMLImageElementClass: MockHTMLImageElement,
+      isProcessableImage: () => true,
+      resolveSourceUrl: () => 'https://lh3.googleusercontent.com/gg/example-token=s1024-rj',
+      showProcessingOverlayImpl: () => {
+        overlayCalls += 1;
+      }
+    });
+
+    assert.equal(result, null);
+    assert.equal(processing.has(image), false);
+    assert.equal(overlayCalls, 0);
+    assert.equal(image.dataset.gwrPageImageState, 'ready');
+  });
+});
+
+test('preparePageImageProcessing should reset previous processed state and return new source context', async () => {
+  await withPageImageTestEnv(async ({ MockHTMLImageElement }) => {
+    const image = new MockHTMLImageElement();
+    image.dataset = {
+      gwrPageImageSource: 'blob:mock:old-source',
+      gwrPageImageState: 'ready',
+      gwrWatermarkObjectUrl: 'blob:mock:old-processed'
+    };
+    image.style = {};
+
+    const processing = new Set();
+    const hiddenImages = [];
+    const revokedUrls = [];
+    const shownImages = [];
+
+    const result = preparePageImageProcessing(image, {
+      processing,
+      HTMLImageElementClass: MockHTMLImageElement,
+      isProcessableImage: () => true,
+      resolveSourceUrl: () => 'https://lh3.googleusercontent.com/gg/example-token=s1024-rj',
+      hideProcessingOverlayImpl: (target, options) => {
+        hiddenImages.push([target, options]);
+      },
+      revokeTrackedObjectUrlImpl: (target) => {
+        revokedUrls.push(target.dataset.gwrWatermarkObjectUrl);
+        delete target.dataset.gwrWatermarkObjectUrl;
+      },
+      showProcessingOverlayImpl: (target) => {
+        shownImages.push(target);
+      }
+    });
+
+    assert.deepEqual(result, {
+      sourceUrl: 'https://lh3.googleusercontent.com/gg/example-token=s1024-rj',
+      normalizedUrl: 'https://lh3.googleusercontent.com/gg/example-token=s0-rj',
+      isPreviewSource: true
+    });
+    assert.equal(processing.has(image), true);
+    assert.equal(image.dataset.gwrStableSource, 'https://lh3.googleusercontent.com/gg/example-token=s1024-rj');
+    assert.equal(image.dataset.gwrPageImageSource, 'https://lh3.googleusercontent.com/gg/example-token=s1024-rj');
+    assert.equal(image.dataset.gwrPageImageState, 'processing');
+    assert.equal(image.dataset.gwrWatermarkObjectUrl, undefined);
+    assert.deepEqual(hiddenImages, [[image, { removeImmediately: true }]]);
+    assert.deepEqual(revokedUrls, ['blob:mock:old-processed']);
+    assert.deepEqual(shownImages, [image]);
+  });
+});
+
+test('emitPageImageProcessingStart should emit preview start and strategy events', () => {
+  const logs = [];
+
+  emitPageImageProcessingStart({
+    logger: createSilentLogger(),
+    onLog: (type, payload) => logs.push([type, payload]),
+    sourceUrl: 'https://lh3.googleusercontent.com/gg/example-token=s1024-rj',
+    normalizedUrl: 'https://lh3.googleusercontent.com/gg/example-token=s0-rj',
+    isPreviewSource: true
+  });
+
+  assert.deepEqual(
+    logs.map(([type]) => type),
+    ['page-image-process-start', 'page-image-process-strategy']
+  );
+  assert.equal(logs[0][1].normalizedUrl, 'https://lh3.googleusercontent.com/gg/example-token=s0-rj');
+  assert.equal(logs[1][1].strategy, 'preview-candidate-fallback');
+});
+
+test('applyPageImageProcessingResult should apply ready state and emit success payload', async () => {
+  await withPageImageTestEnv(async ({ MockHTMLImageElement }) => {
+    const logs = [];
+    const image = new MockHTMLImageElement();
+    image.dataset = {};
+    image.style = {};
+    image.src = 'https://lh3.googleusercontent.com/gg/example-token=s1024-rj';
+
+    const processedBlob = new Blob(['processed'], { type: 'image/png' });
+
+    applyPageImageProcessingResult({
+      imageElement: image,
+      sourceUrl: 'https://lh3.googleusercontent.com/gg/example-token=s1024-rj',
+      normalizedUrl: 'https://lh3.googleusercontent.com/gg/example-token=s0-rj',
+      isPreviewSource: true,
+      sourceResult: {
+        skipped: false,
+        processedBlob,
+        selectedStrategy: '',
+        candidateDiagnostics: [{ strategy: 'rendered-capture', status: 'insufficient' }],
+        candidateDiagnosticsSummary: 'rendered-capture,insufficient'
+      },
+      logger: createSilentLogger(),
+      onLog: (type, payload) => logs.push([type, payload])
+    });
+
+    assert.equal(image.dataset.gwrPageImageState, 'ready');
+    assert.equal(image.dataset.gwrWatermarkObjectUrl, `blob:mock:${processedBlob.size}`);
+    assert.equal(image.src, `blob:mock:${processedBlob.size}`);
+    assert.deepEqual(logs.map(([type]) => type), ['page-image-process-success']);
+    assert.equal(logs[0][1].strategy, 'preview-candidate');
+    assert.equal(logs[0][1].blobType, 'image/png');
+    assert.equal(logs[0][1].blobSize, processedBlob.size);
+  });
+});
+
+test('handlePageImageProcessingFailure should mark image failed and emit diagnostics', async () => {
+  await withPageImageTestEnv(async ({ MockHTMLImageElement }) => {
+    const logs = [];
+    const image = new MockHTMLImageElement();
+    image.dataset = {};
+    image.style = {};
+
+    const error = new Error('boom');
+    error.candidateDiagnostics = [{ strategy: 'page-fetch', status: 'error', error: 'boom' }];
+    error.candidateDiagnosticsSummary = 'page-fetch,error,error=boom';
+
+    handlePageImageProcessingFailure({
+      imageElement: image,
+      sourceUrl: 'https://lh3.googleusercontent.com/gg/example-token=s1024-rj',
+      normalizedUrl: 'https://lh3.googleusercontent.com/gg/example-token=s0-rj',
+      error,
+      logger: createSilentLogger(),
+      onLog: (type, payload) => logs.push([type, payload])
+    });
+
+    assert.equal(image.dataset.gwrPageImageState, 'failed');
+    assert.deepEqual(logs.map(([type]) => type), ['page-image-process-failed']);
+    assert.equal(logs[0][1].error, 'boom');
+    assert.equal(logs[0][1].candidateDiagnosticsSummary, 'page-fetch,error,error=boom');
+  });
+});
+
+test('buildPageImageSourceRequest should assemble source processing dependencies', () => {
+  const imageElement = { tagName: 'IMG' };
+  const fetchPreviewBlob = () => {};
+  const processWatermarkBlobImpl = () => {};
+  const removeWatermarkFromBlobImpl = () => {};
+
+  const request = buildPageImageSourceRequest({
+    sourceUrl: 'https://lh3.googleusercontent.com/gg/example-token=s1024-rj',
+    imageElement,
+    fetchPreviewBlob,
+    processWatermarkBlobImpl,
+    removeWatermarkFromBlobImpl
+  });
+
+  assert.equal(request.sourceUrl, 'https://lh3.googleusercontent.com/gg/example-token=s1024-rj');
+  assert.equal(request.imageElement, imageElement);
+  assert.equal(request.fetchPreviewBlob, fetchPreviewBlob);
+  assert.equal(request.processWatermarkBlobImpl, processWatermarkBlobImpl);
+  assert.equal(request.removeWatermarkFromBlobImpl, removeWatermarkFromBlobImpl);
+  assert.equal(typeof request.captureRenderedImageBlob, 'function');
+  assert.equal(typeof request.fetchBlobDirectImpl, 'function');
+  assert.equal(typeof request.validateBlob, 'function');
+  assert.equal(typeof request.fetchBlobFromBackgroundImpl, 'function');
+});
+
+test('createPageImageReplacementController should apply successful helper result and emit preview events', async () => {
+  await withPageImageTestEnv(async ({ MockHTMLImageElement }) => {
+    const logs = [];
+    const previewBlob = new Blob(['processed'], { type: 'image/png' });
+    const container = createMockElement('div');
+    const image = new MockHTMLImageElement();
+    image.dataset = {
+      gwrSourceUrl: 'https://lh3.googleusercontent.com/gg/example-token=s1024-rj'
+    };
+    image.style = {};
+    image.src = 'https://lh3.googleusercontent.com/gg/example-token=s1024-rj';
+    image.currentSrc = image.src;
+    image.parentElement = container;
+    image.closest = (selector) => selector === 'generated-image,.generated-image-container'
+      ? container
+      : null;
+
+    const controller = createPageImageReplacementController({
+      logger: createSilentLogger(),
+      onLog: (type, payload) => logs.push([type, payload]),
+      processPageImageSourceImpl: async ({ sourceUrl, imageElement }) => {
+        assert.equal(sourceUrl, 'https://lh3.googleusercontent.com/gg/example-token=s1024-rj');
+        assert.equal(imageElement, image);
+        return {
+          skipped: false,
+          processedBlob: previewBlob,
+          selectedStrategy: 'page-fetch',
+          candidateDiagnostics: [{ strategy: 'page-fetch', status: 'confirmed' }],
+          candidateDiagnosticsSummary: 'page-fetch,confirmed'
+        };
+      }
+    });
+
+    controller.processRoot({
+      querySelectorAll() {
+        return [image];
+      }
+    });
+
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(image.dataset.gwrPageImageState, 'ready');
+    assert.equal(image.dataset.gwrWatermarkObjectUrl, `blob:mock:${previewBlob.size}`);
+    assert.equal(image.src, `blob:mock:${previewBlob.size}`);
+    assert.deepEqual(
+      logs.map(([type]) => type),
+      ['page-image-process-start', 'page-image-process-strategy', 'page-image-process-success']
+    );
+    assert.equal(logs[2][1].strategy, 'page-fetch');
+  });
+});
+
+test('createPageImageReplacementController should apply skipped helper result without creating object urls', async () => {
+  await withPageImageTestEnv(async ({ MockHTMLImageElement }) => {
+    const logs = [];
+    const container = createMockElement('div');
+    const image = new MockHTMLImageElement();
+    image.dataset = {
+      gwrSourceUrl: 'https://lh3.googleusercontent.com/gg/example-token=s1024-rj'
+    };
+    image.style = {};
+    image.src = 'https://lh3.googleusercontent.com/gg/example-token=s1024-rj';
+    image.currentSrc = image.src;
+    image.parentElement = container;
+    image.closest = (selector) => selector === 'generated-image,.generated-image-container'
+      ? container
+      : null;
+
+    const controller = createPageImageReplacementController({
+      logger: createSilentLogger(),
+      onLog: (type, payload) => logs.push([type, payload]),
+      processPageImageSourceImpl: async () => ({
+        skipped: true,
+        reason: 'preview-fetch-unavailable',
+        candidateDiagnostics: [{ strategy: 'page-fetch', status: 'error' }],
+        candidateDiagnosticsSummary: 'page-fetch,error'
+      })
+    });
+
+    controller.processRoot({
+      querySelectorAll() {
+        return [image];
+      }
+    });
+
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(image.dataset.gwrPageImageState, 'skipped');
+    assert.equal(image.dataset.gwrWatermarkObjectUrl, undefined);
+    assert.equal(image.src, 'https://lh3.googleusercontent.com/gg/example-token=s1024-rj');
+    assert.deepEqual(
+      logs.map(([type]) => type),
+      ['page-image-process-start', 'page-image-process-strategy', 'page-image-process-skipped']
+    );
+    assert.equal(logs[2][1].reason, 'preview-fetch-unavailable');
+  });
+});
+
+test('handlePageImageMutations should schedule meaningful image attribute mutations and relevant added roots', () => {
+  class MockHTMLImageElement {}
+  const scheduledRoots = [];
+  const targetImage = new MockHTMLImageElement();
+  targetImage.dataset = {};
+  targetImage.currentSrc = 'https://lh3.googleusercontent.com/rd-gg/example=s1024';
+  targetImage.src = targetImage.currentSrc;
+
+  const ignoredImage = new MockHTMLImageElement();
+  ignoredImage.dataset = {
+    gwrWatermarkObjectUrl: 'blob:processed'
+  };
+  ignoredImage.currentSrc = 'blob:processed';
+  ignoredImage.src = 'blob:processed';
+
+  const relevantRoot = {
+    tagName: 'IMG'
+  };
+  const ignoredRoot = {
+    tagName: 'DIV',
+    matches: () => false,
+    querySelector: () => null
+  };
+
+  handlePageImageMutations([
+    {
+      type: 'attributes',
+      target: targetImage,
+      attributeName: 'src',
+      addedNodes: []
+    },
+    {
+      type: 'attributes',
+      target: ignoredImage,
+      attributeName: 'src',
+      addedNodes: []
+    },
+    {
+      type: 'childList',
+      addedNodes: [ignoredRoot, relevantRoot]
+    }
+  ], {
+    scheduleProcess: (root) => scheduledRoots.push(root),
+    HTMLImageElementClass: MockHTMLImageElement
+  });
+
+  assert.deepEqual(scheduledRoots, [
+    targetImage,
+    relevantRoot
+  ]);
+});
+
+test('handlePageImageMutations should ignore non-image attribute mutations and missing added nodes', () => {
+  class MockHTMLImageElement {}
+  const scheduledRoots = [];
+
+  handlePageImageMutations([
+    {
+      type: 'attributes',
+      target: { tagName: 'IMG' },
+      attributeName: 'src',
+      addedNodes: []
+    },
+    {
+      type: 'childList',
+      addedNodes: [null, { tagName: 'SPAN' }]
+    }
+  ], {
+    scheduleProcess: (root) => scheduledRoots.push(root),
+    HTMLImageElementClass: MockHTMLImageElement
+  });
+
+  assert.deepEqual(scheduledRoots, []);
 });
 
 test('shouldScheduleMutationRoot should ignore irrelevant added nodes', () => {
@@ -534,6 +1094,29 @@ test('shouldScheduleAttributeMutation should ignore self-written processed blob 
     currentSrc: 'blob:https://gemini.google.com/processed',
     src: 'blob:https://gemini.google.com/processed'
   }, 'src'), false);
+});
+
+test('isSelfWrittenProcessedImageSource should detect tracked processed object urls', () => {
+  assert.equal(isSelfWrittenProcessedImageSource({
+    dataset: {
+      gwrWatermarkObjectUrl: 'blob:https://gemini.google.com/processed'
+    },
+    currentSrc: 'blob:https://gemini.google.com/processed',
+    src: 'blob:https://gemini.google.com/processed'
+  }), true);
+});
+
+test('isSelfWrittenProcessedImageSource should ignore meaningful non-blob source changes', () => {
+  assert.equal(isSelfWrittenProcessedImageSource({
+    dataset: {
+      gwrWatermarkObjectUrl: 'blob:https://gemini.google.com/processed'
+    },
+    currentSrc: 'https://lh3.googleusercontent.com/rd-gg/example=s2048',
+    src: 'https://lh3.googleusercontent.com/rd-gg/example=s2048'
+  }), false);
+  assert.equal(isSelfWrittenProcessedImageSource({
+    dataset: {}
+  }), false);
 });
 
 test('shouldScheduleAttributeMutation should still react to meaningful source changes', () => {
@@ -661,56 +1244,10 @@ test('createRootBatchProcessor should replace pending descendants when a parent 
   assert.deepEqual(processedRoots, ['root']);
 });
 
-test('fetchBlobFromBackground should use provided page fetcher when runtime messaging is unavailable', async () => {
-  const fetchedBlob = new Blob(['gm-fetch'], { type: 'image/webp' });
-  const calls = [];
-
-  const blob = await fetchBlobFromBackground(
-    null,
-    'https://lh3.googleusercontent.com/gg-dl/example-token=s0-rj',
-    async (url) => {
-      calls.push(url);
-      return fetchedBlob;
-    }
-  );
-
-  assert.equal(blob, fetchedBlob);
-  assert.deepEqual(calls, [
-    'https://lh3.googleusercontent.com/gg-dl/example-token=s0-rj'
-  ]);
-});
-
-test('fetchBlobFromBackground should prefer inferred image type when runtime response mime disagrees with bytes', async () => {
-  const pngBytes = new Uint8Array([
-    0x89, 0x50, 0x4E, 0x47,
-    0x0D, 0x0A, 0x1A, 0x0A,
-    0x00, 0x00, 0x00, 0x0D
-  ]);
-
-  const blob = await fetchBlobFromBackground(
-    async () => ({
-      ok: true,
-      buffer: pngBytes.buffer,
-      mimeType: 'image/jpeg'
-    }),
-    'https://lh3.googleusercontent.com/gg/example-token=s0-rj'
-  );
-
-  assert.equal(blob.type, 'image/png');
-  assert.deepEqual(new Uint8Array(await blob.arrayBuffer()), pngBytes);
-});
-
-test('shouldRetryVisibleCaptureError should classify transient viewport capture failures as retryable', () => {
-  assert.equal(shouldRetryVisibleCaptureError(new Error('Visible capture rect outside screenshot bounds')), true);
-  assert.equal(shouldRetryVisibleCaptureError(new Error('Visible capture rect too small')), true);
-  assert.equal(shouldRetryVisibleCaptureError(new Error('Failed to load captured screenshot')), true);
-  assert.equal(shouldRetryVisibleCaptureError(new Error('Visible-tab capture unavailable')), false);
-});
-
 test('shouldSkipPreviewProcessingFailure should skip previews when fetch is forbidden and rendered capture is tainted', () => {
   assert.equal(shouldSkipPreviewProcessingFailure([
     {
-      strategy: 'background-fetch',
+      strategy: 'page-fetch',
       status: 'error',
       error: 'Failed to fetch image: 403'
     },
@@ -723,7 +1260,7 @@ test('shouldSkipPreviewProcessingFailure should skip previews when fetch is forb
 
   assert.equal(shouldSkipPreviewProcessingFailure([
     {
-      strategy: 'background-fetch',
+      strategy: 'page-fetch',
       status: 'error',
       error: 'Failed to decode Gemini image blob'
     },
@@ -731,67 +1268,8 @@ test('shouldSkipPreviewProcessingFailure should skip previews when fetch is forb
       strategy: 'rendered-capture',
       status: 'error',
       error: "Failed to execute 'toBlob' on 'HTMLCanvasElement': Tainted canvases may not be exported."
-    }
-  ]), false);
-});
-
-test('requestVisibleTabCapture should reuse an in-flight screenshot request', async () => {
-  const runtimeCalls = [];
-  let releaseRequest = null;
-
-  const sendRuntimeMessage = () => {
-    runtimeCalls.push('capture');
-    return new Promise((resolve) => {
-      releaseRequest = () => resolve({ dataUrl: 'data:image/png;base64,AAAA' });
-    });
-  };
-
-  const firstPromise = requestVisibleTabCapture(sendRuntimeMessage, {
-    forceRefresh: true,
-    cacheTtlMs: 1000,
-    now: () => 100
-  });
-  const secondPromise = requestVisibleTabCapture(sendRuntimeMessage, {
-    cacheTtlMs: 1000,
-    now: () => 100
-  });
-
-  assert.equal(runtimeCalls.length, 1);
-
-  releaseRequest();
-
-  const [first, second] = await Promise.all([firstPromise, secondPromise]);
-  assert.equal(first, 'data:image/png;base64,AAAA');
-  assert.equal(second, 'data:image/png;base64,AAAA');
-});
-
-test('requestVisibleTabCapture should reuse a fresh cached screenshot until ttl expires', async () => {
-  const runtimeCalls = [];
-  const sendRuntimeMessage = async () => {
-    runtimeCalls.push('capture');
-    return {
-      dataUrl: `data:image/png;base64,${runtimeCalls.length}`
-    };
-  };
-
-  const first = await requestVisibleTabCapture(sendRuntimeMessage, {
-    forceRefresh: true,
-    cacheTtlMs: 1000,
-    now: () => 100
-  });
-  const second = await requestVisibleTabCapture(sendRuntimeMessage, {
-    cacheTtlMs: 1000,
-    now: () => 600
-  });
-  const third = await requestVisibleTabCapture(sendRuntimeMessage, {
-    cacheTtlMs: 1000,
-    now: () => 1501
-  });
-
-  assert.equal(first, 'data:image/png;base64,1');
-  assert.equal(second, 'data:image/png;base64,1');
-  assert.equal(third, 'data:image/png;base64,2');
-  assert.equal(runtimeCalls.length, 2);
+      }
+    ]), false);
 });
 
 test('showProcessingOverlay should append one overlay and apply a subdued processing look to the image', () => {

@@ -5,51 +5,18 @@ export function shouldFetchBlobDirectly(sourceUrl) {
     && (sourceUrl.startsWith('blob:') || sourceUrl.startsWith('data:'));
 }
 
-function isTaintedCanvasError(error) {
-  const message = error instanceof Error ? error.message : String(error || '');
-  const name = error instanceof Error ? error.name : '';
-  return name === 'SecurityError' || /tainted canvases may not be exported/i.test(message);
-}
-
 function shouldPreferRenderedCapture(sourceUrl) {
   return isGeminiPreviewAssetUrl(sourceUrl);
 }
 
-async function captureWithFallback({
+async function captureRenderedBlob({
   image,
-  captureRenderedImageBlob,
-  captureVisibleElementBlob
+  captureRenderedImageBlob
 }) {
-  try {
-    return await captureRenderedImageBlob(image);
-  } catch (error) {
-    if (typeof captureVisibleElementBlob === 'function' && isTaintedCanvasError(error)) {
-      return captureVisibleElementBlob(image);
-    }
-    throw error;
+  if (typeof captureRenderedImageBlob !== 'function') {
+    throw new Error('Rendered capture unavailable');
   }
-}
-
-async function capturePreviewBlob({
-  image,
-  captureRenderedImageBlob,
-  captureVisibleElementBlob
-}) {
-  let visibleCaptureError = null;
-
-  if (typeof captureVisibleElementBlob === 'function') {
-    try {
-      return await captureVisibleElementBlob(image);
-    } catch (error) {
-      visibleCaptureError = error;
-    }
-  }
-
-  if (typeof captureRenderedImageBlob === 'function') {
-    return captureRenderedImageBlob(image);
-  }
-
-  throw visibleCaptureError || new Error('Preview capture unavailable');
+  return captureRenderedImageBlob(image);
 }
 
 export async function acquireOriginalBlob({
@@ -58,16 +25,14 @@ export async function acquireOriginalBlob({
   fetchBlobFromBackground,
   fetchBlobDirect,
   captureRenderedImageBlob,
-  captureVisibleElementBlob,
   validateBlob
 }) {
   const normalizedSourceUrl = typeof sourceUrl === 'string' ? sourceUrl.trim() : '';
 
   if (shouldPreferRenderedCapture(normalizedSourceUrl)) {
-    return capturePreviewBlob({
+    return captureRenderedBlob({
       image,
-      captureRenderedImageBlob,
-      captureVisibleElementBlob
+      captureRenderedImageBlob
     });
   }
 
@@ -77,10 +42,9 @@ export async function acquireOriginalBlob({
       try {
         await validateBlob(blob);
       } catch {
-        return captureWithFallback({
+        return captureRenderedBlob({
           image,
-          captureRenderedImageBlob,
-          captureVisibleElementBlob
+          captureRenderedImageBlob
         });
       }
     }
@@ -91,9 +55,8 @@ export async function acquireOriginalBlob({
     return fetchBlobDirect(normalizedSourceUrl);
   }
 
-  return captureWithFallback({
+  return captureRenderedBlob({
     image,
-    captureRenderedImageBlob,
-    captureVisibleElementBlob
+    captureRenderedImageBlob
   });
 }

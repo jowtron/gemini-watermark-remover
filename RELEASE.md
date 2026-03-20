@@ -6,7 +6,7 @@ This repository currently ships three release surfaces:
 
 - website build in `dist/`
 - userscript bundle in `dist/userscript/gemini-watermark-remover.user.js`
-- unpacked extension build in `dist/extension/`
+- package/sdk metadata from `package.json`
 
 ## Preflight
 
@@ -22,7 +22,7 @@ Expected result:
 
 - all tests pass
 - `dist/userscript/gemini-watermark-remover.user.js` is regenerated
-- `dist/extension/manifest.json` uses the current `package.json` version
+- generated userscript metadata uses the current `package.json` version
 
 ## Release Metadata
 
@@ -36,7 +36,7 @@ Expected result:
 - verify Gemini page preview replacement works
 - verify native Gemini copy/download still returns processed output
 - verify preview processing failure leaves the original page image visible
-- load `dist/extension/` as an unpacked extension and smoke-test one Gemini session
+- if you publish the sdk surface, run a final package smoke check before uploading
 
 ## Publish
 
@@ -44,6 +44,7 @@ Expected result:
 - create a git tag matching the package version, for example `v1.0.1`
 - publish or upload the built userscript from `dist/userscript/gemini-watermark-remover.user.js`
 - deploy website assets from `dist/` if the online entry changed
+- publish the sdk package only if this release includes package-facing changes
 
 ## Post-Release
 

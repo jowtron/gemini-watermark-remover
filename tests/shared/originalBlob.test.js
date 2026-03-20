@@ -84,104 +84,9 @@ test('acquireOriginalBlob should fetch tiered Gemini gg download asset urls thro
   ]);
 });
 
-test('acquireOriginalBlob should prefer visible capture for Gemini gg preview urls when available', async () => {
-  const visibleBlob = new Blob(['visible-capture'], { type: 'image/png' });
-  const fixtureImage = { id: 'fixture-image' };
-  const calls = [];
-
-  const blob = await acquireOriginalBlob({
-    sourceUrl: 'https://lh3.googleusercontent.com/gg/example-token=s1024-rj',
-    image: fixtureImage,
-    fetchBlobFromBackground: async (url) => {
-      calls.push(['background', url]);
-      return new Blob(['background'], { type: 'image/png' });
-    },
-    fetchBlobDirect: async (url) => {
-      calls.push(['direct', url]);
-      return new Blob(['direct'], { type: 'image/png' });
-    },
-    captureRenderedImageBlob: async (image) => {
-      calls.push(['capture', image]);
-      return new Blob(['capture'], { type: 'image/png' });
-    },
-    captureVisibleElementBlob: async (image) => {
-      calls.push(['visible-capture', image]);
-      return visibleBlob;
-    }
-  });
-
-  assert.equal(blob, visibleBlob);
-  assert.deepEqual(calls, [
-    ['visible-capture', fixtureImage]
-  ]);
-});
-
-test('acquireOriginalBlob should prefer visible capture for Gemini gg tiered preview urls when available', async () => {
-  const visibleBlob = new Blob(['visible-capture'], { type: 'image/png' });
-  const fixtureImage = { id: 'fixture-image' };
-  const calls = [];
-
-  const blob = await acquireOriginalBlob({
-    sourceUrl: 'https://lh3.googleusercontent.com/gg-premium/example-token=s1024-rj',
-    image: fixtureImage,
-    fetchBlobFromBackground: async (url) => {
-      calls.push(['background', url]);
-      return new Blob(['background'], { type: 'image/png' });
-    },
-    fetchBlobDirect: async (url) => {
-      calls.push(['direct', url]);
-      return new Blob(['direct'], { type: 'image/png' });
-    },
-    captureRenderedImageBlob: async (image) => {
-      calls.push(['capture', image]);
-      return new Blob(['capture'], { type: 'image/png' });
-    },
-    captureVisibleElementBlob: async (image) => {
-      calls.push(['visible-capture', image]);
-      return visibleBlob;
-    }
-  });
-
-  assert.equal(blob, visibleBlob);
-  assert.deepEqual(calls, [
-    ['visible-capture', fixtureImage]
-  ]);
-});
-
-test('acquireOriginalBlob should prefer visible capture for Gemini gg ultra preview urls when available', async () => {
-  const visibleBlob = new Blob(['visible-capture'], { type: 'image/png' });
-  const fixtureImage = { id: 'fixture-image' };
-  const calls = [];
-
-  const blob = await acquireOriginalBlob({
-    sourceUrl: 'https://lh3.googleusercontent.com/gg-ultra/example-token=s1024-rj',
-    image: fixtureImage,
-    fetchBlobFromBackground: async (url) => {
-      calls.push(['background', url]);
-      return new Blob(['background'], { type: 'image/png' });
-    },
-    fetchBlobDirect: async (url) => {
-      calls.push(['direct', url]);
-      return new Blob(['direct'], { type: 'image/png' });
-    },
-    captureRenderedImageBlob: async (image) => {
-      calls.push(['capture', image]);
-      return new Blob(['capture'], { type: 'image/png' });
-    },
-    captureVisibleElementBlob: async (image) => {
-      calls.push(['visible-capture', image]);
-      return visibleBlob;
-    }
-  });
-
-  assert.equal(blob, visibleBlob);
-  assert.deepEqual(calls, [
-    ['visible-capture', fixtureImage]
-  ]);
-});
-
-test('acquireOriginalBlob should fall back to rendered capture when Gemini gg visible capture fails', async () => {
+test('acquireOriginalBlob should ignore visible capture for Gemini gg preview urls', async () => {
   const renderedBlob = new Blob(['rendered-capture'], { type: 'image/png' });
+  const visibleBlob = new Blob(['visible-capture'], { type: 'image/png' });
   const fixtureImage = { id: 'fixture-image' };
   const calls = [];
 
@@ -202,13 +107,116 @@ test('acquireOriginalBlob should fall back to rendered capture when Gemini gg vi
     },
     captureVisibleElementBlob: async (image) => {
       calls.push(['visible-capture', image]);
-      throw new Error('Visible capture rect too small');
+      return visibleBlob;
     }
   });
 
   assert.equal(blob, renderedBlob);
   assert.deepEqual(calls, [
-    ['visible-capture', fixtureImage],
+    ['capture', fixtureImage]
+  ]);
+});
+
+test('acquireOriginalBlob should capture Gemini gg tiered preview urls from rendered image', async () => {
+  const renderedBlob = new Blob(['rendered-capture'], { type: 'image/png' });
+  const visibleBlob = new Blob(['visible-capture'], { type: 'image/png' });
+  const fixtureImage = { id: 'fixture-image' };
+  const calls = [];
+
+  const blob = await acquireOriginalBlob({
+    sourceUrl: 'https://lh3.googleusercontent.com/gg-premium/example-token=s1024-rj',
+    image: fixtureImage,
+    fetchBlobFromBackground: async (url) => {
+      calls.push(['background', url]);
+      return new Blob(['background'], { type: 'image/png' });
+    },
+    fetchBlobDirect: async (url) => {
+      calls.push(['direct', url]);
+      return new Blob(['direct'], { type: 'image/png' });
+    },
+    captureRenderedImageBlob: async (image) => {
+      calls.push(['capture', image]);
+      return renderedBlob;
+    },
+    captureVisibleElementBlob: async (image) => {
+      calls.push(['visible-capture', image]);
+      return visibleBlob;
+    }
+  });
+
+  assert.equal(blob, renderedBlob);
+  assert.deepEqual(calls, [
+    ['capture', fixtureImage]
+  ]);
+});
+
+test('acquireOriginalBlob should capture Gemini gg ultra preview urls from rendered image', async () => {
+  const renderedBlob = new Blob(['rendered-capture'], { type: 'image/png' });
+  const visibleBlob = new Blob(['visible-capture'], { type: 'image/png' });
+  const fixtureImage = { id: 'fixture-image' };
+  const calls = [];
+
+  const blob = await acquireOriginalBlob({
+    sourceUrl: 'https://lh3.googleusercontent.com/gg-ultra/example-token=s1024-rj',
+    image: fixtureImage,
+    fetchBlobFromBackground: async (url) => {
+      calls.push(['background', url]);
+      return new Blob(['background'], { type: 'image/png' });
+    },
+    fetchBlobDirect: async (url) => {
+      calls.push(['direct', url]);
+      return new Blob(['direct'], { type: 'image/png' });
+    },
+    captureRenderedImageBlob: async (image) => {
+      calls.push(['capture', image]);
+      return renderedBlob;
+    },
+    captureVisibleElementBlob: async (image) => {
+      calls.push(['visible-capture', image]);
+      return visibleBlob;
+    }
+  });
+
+  assert.equal(blob, renderedBlob);
+  assert.deepEqual(calls, [
+    ['capture', fixtureImage]
+  ]);
+});
+
+test('acquireOriginalBlob should fall back to rendered capture when Gemini asset validation fails', async () => {
+  const renderedBlob = new Blob(['rendered-capture'], { type: 'image/png' });
+  const invalidBlob = new Blob(['invalid'], { type: 'text/plain' });
+  const fixtureImage = { id: 'fixture-image' };
+  const calls = [];
+
+  const blob = await acquireOriginalBlob({
+    sourceUrl: 'https://lh3.googleusercontent.com/gg-dl/example=s1024-rj',
+    image: fixtureImage,
+    fetchBlobFromBackground: async (url) => {
+      calls.push(['background', url]);
+      return invalidBlob;
+    },
+    fetchBlobDirect: async (url) => {
+      calls.push(['direct', url]);
+      return new Blob(['direct'], { type: 'image/png' });
+    },
+    validateBlob: async (blob) => {
+      calls.push(['validate', blob]);
+      throw new Error('blob decode failed');
+    },
+    captureRenderedImageBlob: async (image) => {
+      calls.push(['capture', image]);
+      return renderedBlob;
+    },
+    captureVisibleElementBlob: async () => {
+      throw new Error('visible capture should not be used');
+    }
+  });
+
+  assert.equal(blob, renderedBlob);
+  assert.deepEqual(calls, [
+    ['background', 'https://lh3.googleusercontent.com/gg-dl/example=s1024-rj'],
+    ['validate', invalidBlob],
     ['capture', fixtureImage]
   ]);
 });
@@ -295,7 +303,7 @@ test('acquireOriginalBlob should fall back to rendered capture for non-Gemini no
   ]);
 });
 
-test('acquireOriginalBlob should fall back to rendered capture for Gemini gg preview urls when visible capture is unavailable', async () => {
+test('acquireOriginalBlob should capture Gemini gg preview urls with rendered capture when visible capture is unavailable', async () => {
   const capturedBlob = new Blob(['capture'], { type: 'image/png' });
   const fixtureImage = { id: 'fixture-image' };
   const calls = [];
@@ -305,7 +313,7 @@ test('acquireOriginalBlob should fall back to rendered capture for Gemini gg pre
     image: fixtureImage,
     fetchBlobFromBackground: async (url) => {
       calls.push(['background', url]);
-      return invalidBlob;
+      return new Blob(['background'], { type: 'image/png' });
     },
     fetchBlobDirect: async (url) => {
       calls.push(['direct', url]);
@@ -323,35 +331,40 @@ test('acquireOriginalBlob should fall back to rendered capture for Gemini gg pre
   ]);
 });
 
-test('acquireOriginalBlob should still use visible capture when Gemini gg preview render capture would be tainted', async () => {
-  const visibleBlob = new Blob(['visible-capture'], { type: 'image/png' });
+test('acquireOriginalBlob should surface rendered capture errors for Gemini gg preview urls', async () => {
   const fixtureImage = { id: 'fixture-image' };
+  const visibleBlob = new Blob(['visible-capture'], { type: 'image/png' });
   const calls = [];
 
-  const blob = await acquireOriginalBlob({
-    sourceUrl: 'https://lh3.googleusercontent.com/gg/example-token=s1024-rj',
-    image: fixtureImage,
-    fetchBlobFromBackground: async (url) => {
-      calls.push(['background', url]);
-      return new Blob(['background'], { type: 'image/png' });
-    },
-    fetchBlobDirect: async () => {
-      throw new Error('direct fetch should not be used');
-    },
-    captureRenderedImageBlob: async (image) => {
-      calls.push(['capture', image]);
-      const error = new Error("Failed to execute 'toBlob' on 'HTMLCanvasElement': Tainted canvases may not be exported.");
-      error.name = 'SecurityError';
-      throw error;
-    },
-    captureVisibleElementBlob: async (image) => {
-      calls.push(['visible-capture', image]);
-      return visibleBlob;
+  await assert.rejects(
+    () => acquireOriginalBlob({
+      sourceUrl: 'https://lh3.googleusercontent.com/gg/example-token=s1024-rj',
+      image: fixtureImage,
+      fetchBlobFromBackground: async (url) => {
+        calls.push(['background', url]);
+        return new Blob(['background'], { type: 'image/png' });
+      },
+      fetchBlobDirect: async () => {
+        throw new Error('direct fetch should not be used');
+      },
+      captureRenderedImageBlob: async (image) => {
+        calls.push(['capture', image]);
+        const error = new Error("Failed to execute 'toBlob' on 'HTMLCanvasElement': Tainted canvases may not be exported.");
+        error.name = 'SecurityError';
+        throw error;
+      },
+      captureVisibleElementBlob: async (image) => {
+        calls.push(['visible-capture', image]);
+        return visibleBlob;
+      }
+    }),
+    {
+      name: 'SecurityError',
+      message: /tainted canvases may not be exported/i
     }
-  });
+  );
 
-  assert.equal(blob, visibleBlob);
   assert.deepEqual(calls, [
-    ['visible-capture', fixtureImage]
+    ['capture', fixtureImage]
   ]);
 });

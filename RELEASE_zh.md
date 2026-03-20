@@ -6,7 +6,7 @@
 
 - 网站构建产物：`dist/`
 - 油猴脚本产物：`dist/userscript/gemini-watermark-remover.user.js`
-- Chrome/Edge 已解压扩展产物：`dist/extension/`
+- `package.json` 对应的 package/sdk 元数据
 
 ## 发布前检查
 
@@ -22,7 +22,7 @@ pnpm build
 
 - 所有测试通过
 - `dist/userscript/gemini-watermark-remover.user.js` 已重新生成
-- `dist/extension/manifest.json` 使用当前 `package.json` 版本号
+- 生成后的 userscript 元数据使用当前 `package.json` 版本号
 
 ## 版本元数据
 
@@ -36,7 +36,7 @@ pnpm build
 - 验证 Gemini 页面预览图替换链路正常
 - 验证 Gemini 原生复制/下载动作仍返回去水印后的结果
 - 验证预览图处理失败时页面原图仍保持可见
-- 加载 `dist/extension/` 作为已解压扩展，并手工验证至少一个 Gemini 会话
+- 如果本次要发布 sdk/package，发包前再做一次 package smoke 检查
 
 ## 发布
 
@@ -44,6 +44,7 @@ pnpm build
 - 创建与版本号一致的 git tag，例如 `v1.0.1`
 - 发布或上传 `dist/userscript/gemini-watermark-remover.user.js`
 - 如果在线站点入口有变更，同步部署 `dist/` 下的网站产物
+- 只有本次涉及 package 对外接口时，才同步发布 sdk/package
 
 ## 发布后检查
 

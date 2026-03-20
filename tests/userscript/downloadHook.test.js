@@ -80,7 +80,7 @@ test('createGeminiDownloadFetchHook should fall back to original response when p
   assert.equal(await response.text(), 'original');
 });
 
-test('createGeminiDownloadFetchHook should reuse processed result for repeated normalized url requests', async () => {
+test('createGeminiDownloadFetchHook should reprocess repeated normalized url requests after the in-flight cache settles', async () => {
   let processCount = 0;
   const originalFetch = async () => new Response(new Blob(['original'], { type: 'image/png' }), {
     status: 200,
@@ -101,8 +101,50 @@ test('createGeminiDownloadFetchHook should reuse processed result for repeated n
   const second = await hook('https://lh3.googleusercontent.com/rd-gg/token=s512');
 
   assert.equal(await first.text(), 'processed-1');
+  assert.equal(await second.text(), 'processed-2');
+  assert.equal(processCount, 2);
+});
+
+test('createGeminiDownloadFetchHook should only keep in-flight cache entries and release them after success', async () => {
+  let processCount = 0;
+  let releaseProcessing = null;
+  let notifyProcessingStarted = null;
+  const processingStarted = new Promise((resolve) => {
+    notifyProcessingStarted = resolve;
+  });
+  const cache = new Map();
+  const originalFetch = async () => new Response(new Blob(['original'], { type: 'image/png' }), {
+    status: 200,
+    headers: { 'content-type': 'image/png' }
+  });
+
+  const hook = createGeminiDownloadFetchHook({
+    originalFetch,
+    cache,
+    isTargetUrl: () => true,
+    normalizeUrl: () => 'https://lh3.googleusercontent.com/rd-gg/token=s0',
+    processBlob: async () => {
+      processCount += 1;
+      notifyProcessingStarted();
+      await new Promise((resolve) => {
+        releaseProcessing = resolve;
+      });
+      return new Blob([`processed-${processCount}`], { type: 'image/png' });
+    }
+  });
+
+  const firstPromise = hook('https://lh3.googleusercontent.com/rd-gg/token=s1024');
+  const secondPromise = hook('https://lh3.googleusercontent.com/rd-gg/token=s512');
+  await processingStarted;
+
+  releaseProcessing();
+
+  const [first, second] = await Promise.all([firstPromise, secondPromise]);
+
+  assert.equal(await first.text(), 'processed-1');
   assert.equal(await second.text(), 'processed-1');
   assert.equal(processCount, 1);
+  assert.equal(cache.size, 0);
 });
 
 test('createGeminiDownloadFetchHook should bypass interception when gwr bypass flag is present', async () => {

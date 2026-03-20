@@ -23,18 +23,12 @@ const PROCESSING_VISUAL_DATA_KEY = 'gwrProcessingVisual';
 const OBSERVED_ATTRIBUTES = ['src', 'srcset', 'data-gwr-source-url'];
 const PAGE_FETCH_REQUEST = 'gwr:page-fetch-request';
 const PAGE_FETCH_RESPONSE = 'gwr:page-fetch-response';
+const PROCESSING_OVERLAY_FADE_MS = 180;
 const MIN_VISIBLE_CAPTURE_EDGE = 32;
 const MIN_VISIBLE_CAPTURE_AREA = MIN_VISIBLE_CAPTURE_EDGE * MIN_VISIBLE_CAPTURE_EDGE;
 const CONTAINER_CAPTURE_AREA_RATIO = 4;
-const PROCESSING_OVERLAY_FADE_MS = 180;
-const VISIBLE_TAB_CAPTURE_CACHE_TTL_MS = 1000;
 
 const processingOverlayState = new WeakMap();
-const visibleTabCaptureState = {
-  dataUrl: '',
-  capturedAt: 0,
-  inFlightPromise: null
-};
 
 function appendLog(onLog, type, payload = {}) {
   if (typeof onLog === 'function') {
@@ -42,37 +36,46 @@ function appendLog(onLog, type, payload = {}) {
   }
 }
 
-function isGeminiPreviewUrl(url) {
-  return isGeminiPreviewAssetUrl(url);
+function emitPageImageProcessEvent({
+  logger,
+  onLog,
+  level = 'info',
+  consoleMessage,
+  eventType,
+  payload
+}) {
+  logger?.[level]?.(consoleMessage, payload);
+  appendLog(onLog, eventType, payload);
 }
 
-function buildRuntimeMessageSender(runtime = globalThis.chrome?.runtime) {
-  if (!runtime?.sendMessage) {
-    return null;
-  }
+function getErrorCandidateDiagnostics(error) {
+  return Array.isArray(error?.candidateDiagnostics) ? error.candidateDiagnostics : null;
+}
 
-  return (message) => new Promise((resolve, reject) => {
+function getErrorCandidateDiagnosticsSummary(error) {
+  return typeof error?.candidateDiagnosticsSummary === 'string'
+    ? error.candidateDiagnosticsSummary
+    : '';
+}
+
+function createPreviewCandidateProcessor(processWatermarkBlobImpl) {
+  return async (candidate) => {
+    const originalBlob = await candidate.getOriginalBlob();
     try {
-      runtime.sendMessage(message, (response) => {
-        const runtimeError = runtime.lastError;
-        if (runtimeError) {
-          reject(new Error(runtimeError.message || 'Runtime message failed'));
-          return;
-        }
-        if (!response) {
-          reject(new Error('Runtime message returned empty response'));
-          return;
-        }
-        if (response.ok === false) {
-          reject(new Error(normalizeErrorMessage(response.error, 'Runtime message failed')));
-          return;
-        }
-        resolve(response);
-      });
+      const processedResult = await processWatermarkBlobImpl(originalBlob);
+      return {
+        ...processedResult,
+        sourceBlobType: originalBlob.type || '',
+        sourceBlobSize: originalBlob.size || 0
+      };
     } catch (error) {
-      reject(error);
+      if (error && typeof error === 'object') {
+        error.sourceBlobType = originalBlob.type || '';
+        error.sourceBlobSize = originalBlob.size || 0;
+      }
+      throw error;
     }
-  });
+  };
 }
 
 async function fetchBlobDirect(url) {
@@ -86,96 +89,11 @@ async function fetchBlobDirect(url) {
   return response.blob();
 }
 
-function hasBytePrefix(bytes, prefix) {
-  if (!bytes || bytes.length < prefix.length) return false;
-  for (let index = 0; index < prefix.length; index += 1) {
-    if (bytes[index] !== prefix[index]) {
-      return false;
-    }
+export async function fetchBlobFromBackground(url, fallbackFetchBlob = null) {
+  if (typeof fallbackFetchBlob === 'function') {
+    return fallbackFetchBlob(url);
   }
-  return true;
-}
-
-export function inferImageMimeTypeFromBytes(buffer) {
-  const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer || 0);
-  if (bytes.length < 12) return '';
-
-  if (hasBytePrefix(bytes, [0x89, 0x50, 0x4E, 0x47])) {
-    return 'image/png';
-  }
-
-  if (hasBytePrefix(bytes, [0xFF, 0xD8, 0xFF])) {
-    return 'image/jpeg';
-  }
-
-  if (
-    hasBytePrefix(bytes, [0x52, 0x49, 0x46, 0x46]) &&
-    bytes[8] === 0x57 &&
-    bytes[9] === 0x45 &&
-    bytes[10] === 0x42 &&
-    bytes[11] === 0x50
-  ) {
-    return 'image/webp';
-  }
-
-  if (
-    hasBytePrefix(bytes, [0x47, 0x49, 0x46, 0x38, 0x37, 0x61]) ||
-    hasBytePrefix(bytes, [0x47, 0x49, 0x46, 0x38, 0x39, 0x61])
-  ) {
-    return 'image/gif';
-  }
-
-  if (hasBytePrefix(bytes, [0x42, 0x4D])) {
-    return 'image/bmp';
-  }
-
-  if (
-    bytes[4] === 0x66 &&
-    bytes[5] === 0x74 &&
-    bytes[6] === 0x79 &&
-    bytes[7] === 0x70
-  ) {
-    const majorBrand = String.fromCharCode(bytes[8], bytes[9], bytes[10], bytes[11]).toLowerCase();
-    if (majorBrand.startsWith('avi')) {
-      return 'image/avif';
-    }
-  }
-
-  return '';
-}
-
-function resolveFetchedImageMimeType(mimeType, buffer) {
-  const normalizedMimeType = typeof mimeType === 'string'
-    ? mimeType.split(';')[0].trim().toLowerCase()
-    : '';
-  const inferredMimeType = inferImageMimeTypeFromBytes(buffer);
-
-  if (inferredMimeType) {
-    if (!normalizedMimeType || normalizedMimeType === 'application/octet-stream') {
-      return inferredMimeType;
-    }
-    if (normalizedMimeType !== inferredMimeType) {
-      return inferredMimeType;
-    }
-  }
-
-  return normalizedMimeType || inferredMimeType || 'image/png';
-}
-
-export async function fetchBlobFromBackground(sendRuntimeMessage, url, fallbackFetchBlob = null) {
-  if (!sendRuntimeMessage) {
-    if (typeof fallbackFetchBlob === 'function') {
-      return fallbackFetchBlob(url);
-    }
-    return fetchBlobDirect(url);
-  }
-
-  const response = await sendRuntimeMessage({
-    type: 'gwr:fetch-image',
-    url
-  });
-  const blobMimeType = resolveFetchedImageMimeType(response.mimeType, response.buffer);
-  return new Blob([response.buffer], { type: blobMimeType });
+  return fetchBlobDirect(url);
 }
 
 let pageFetchRequestCounter = 0;
@@ -238,15 +156,6 @@ async function imageElementToBlob(imageElement) {
   }
   context.drawImage(imageElement, 0, 0, width, height);
   return canvasToBlob(canvas);
-}
-
-async function loadImageFromUrl(url) {
-  return new Promise((resolve, reject) => {
-    const image = new Image();
-    image.onload = () => resolve(image);
-    image.onerror = () => reject(new Error('Failed to load captured screenshot'));
-    image.src = url;
-  });
 }
 
 function normalizeCaptureRect(rect) {
@@ -470,12 +379,6 @@ function waitForNextFrame() {
   });
 }
 
-async function waitForFrames(frameCount = 1) {
-  for (let index = 0; index < frameCount; index += 1) {
-    await waitForNextFrame();
-  }
-}
-
 function getRenderableImageSize(imageElement) {
   const width = Number(imageElement?.naturalWidth) || Number(imageElement?.width) || Number(imageElement?.clientWidth) || 0;
   const height = Number(imageElement?.naturalHeight) || Number(imageElement?.height) || Number(imageElement?.clientHeight) || 0;
@@ -513,33 +416,12 @@ export async function waitForRenderableImageSize(imageElement, timeoutMs = 1500)
   throw new Error('Image has no renderable size');
 }
 
-async function ensureVisibleCaptureTargetInViewport(imageElement, { forceScroll = false } = {}) {
-  const target = getPreferredGeminiImageContainer(imageElement) || imageElement;
-  const currentRect = intersectCaptureRectWithViewport(resolveVisibleCaptureRect(imageElement));
-  if (!forceScroll && isMeaningfulCaptureRect(currentRect)) {
-    return currentRect;
-  }
-
-  if (typeof target?.scrollIntoView === 'function') {
-    target.scrollIntoView({
-      block: 'center',
-      inline: 'center',
-      behavior: 'auto'
-    });
-    await waitForFrames(2);
-  }
-
-  return intersectCaptureRectWithViewport(resolveVisibleCaptureRect(imageElement));
-}
-
 function hasConfirmedGeminiPreviewMeta(processedMeta) {
   return classifyGeminiAttributionFromWatermarkMeta(processedMeta).tier !== 'insufficient';
 }
 
 function isSafePreviewFallbackStrategy(strategy) {
-  return strategy === 'rendered-capture'
-    || strategy === 'page-fetch'
-    || strategy === 'background-fetch';
+  return strategy === 'rendered-capture';
 }
 
 function isBlobLike(value) {
@@ -570,75 +452,20 @@ function summarizeCandidateDiagnostics(diagnostics) {
     .join(' | ');
 }
 
-export function shouldRetryVisibleCaptureError(error) {
-  const message = normalizeErrorMessage(error).toLowerCase();
-  return message.includes('visible capture rect outside screenshot bounds')
-    || message.includes('visible capture rect too small')
-    || message.includes('failed to load captured screenshot');
-}
-
 export function shouldSkipPreviewProcessingFailure(diagnostics = []) {
   if (!Array.isArray(diagnostics) || diagnostics.length === 0) {
     return false;
   }
 
-  const backgroundFetchFailure = diagnostics.find((item) => item?.strategy === 'background-fetch');
+  const pageFetchFailure = diagnostics.find((item) => item?.strategy === 'page-fetch');
   const renderedCaptureFailure = diagnostics.find((item) => item?.strategy === 'rendered-capture');
-  const backgroundFetchError = String(backgroundFetchFailure?.error || '');
+  const pageFetchError = String(pageFetchFailure?.error || '');
   const renderedCaptureError = String(renderedCaptureFailure?.error || '');
 
-  return backgroundFetchFailure?.status === 'error'
-    && /failed to fetch image: 403/i.test(backgroundFetchError)
+  return pageFetchFailure?.status === 'error'
+    && /failed to fetch image: 403/i.test(pageFetchError)
     && renderedCaptureFailure?.status === 'error'
     && /tainted canvases may not be exported/i.test(renderedCaptureError);
-}
-
-export function requestVisibleTabCapture(
-  sendRuntimeMessage,
-  {
-    forceRefresh = false,
-    cacheState = visibleTabCaptureState,
-    cacheTtlMs = VISIBLE_TAB_CAPTURE_CACHE_TTL_MS,
-    now = () => Date.now()
-  } = {}
-) {
-  if (typeof sendRuntimeMessage !== 'function') {
-    throw new Error('Visible-tab capture unavailable');
-  }
-
-  if (cacheState?.inFlightPromise) {
-    return cacheState.inFlightPromise;
-  }
-
-  const nowValue = Number(now()) || 0;
-  const hasFreshCachedCapture = !forceRefresh
-    && typeof cacheState?.dataUrl === 'string'
-    && cacheState.dataUrl
-    && Number.isFinite(cacheState?.capturedAt)
-    && nowValue - cacheState.capturedAt <= cacheTtlMs;
-
-  if (hasFreshCachedCapture) {
-    return Promise.resolve(cacheState.dataUrl);
-  }
-
-  const capturePromise = Promise.resolve(sendRuntimeMessage({ type: 'gwr:capture-visible-tab' }))
-    .then((response) => {
-      const dataUrl = typeof response?.dataUrl === 'string' ? response.dataUrl : '';
-      if (!dataUrl) {
-        throw new Error('Visible-tab capture returned empty response');
-      }
-      cacheState.dataUrl = dataUrl;
-      cacheState.capturedAt = Number(now()) || Date.now();
-      return dataUrl;
-    })
-    .finally(() => {
-      if (cacheState.inFlightPromise === capturePromise) {
-        cacheState.inFlightPromise = null;
-      }
-    });
-
-  cacheState.inFlightPromise = capturePromise;
-  return capturePromise;
 }
 
 export async function resolvePreviewReplacementResult({
@@ -648,8 +475,6 @@ export async function resolvePreviewReplacementResult({
   let lastError = null;
   let sawInsufficientCandidate = false;
   let fallbackResult = null;
-  let visibleCaptureFallbackResult = null;
-  let sawPreviewFetchCandidateError = false;
   const diagnostics = [];
 
   for (const candidate of candidates) {
@@ -687,17 +512,9 @@ export async function resolvePreviewReplacementResult({
         if (!fallbackResult) {
           fallbackResult = nextFallbackResult;
         }
-      } else if (candidate.strategy === 'visible-capture' && isBlobLike(result?.processedBlob)) {
-        visibleCaptureFallbackResult = {
-          ...result,
-          strategy: candidate.strategy || ''
-        };
       }
     } catch (error) {
       lastError = error;
-      if (candidate.strategy === 'background-fetch' || candidate.strategy === 'page-fetch') {
-        sawPreviewFetchCandidateError = true;
-      }
       diagnostics.push({
         strategy: candidate.strategy || '',
         status: 'error',
@@ -710,14 +527,6 @@ export async function resolvePreviewReplacementResult({
 
   if (fallbackResult) {
     return fallbackResult;
-  }
-
-  if (visibleCaptureFallbackResult && sawPreviewFetchCandidateError) {
-    return {
-      ...visibleCaptureFallbackResult,
-      diagnostics: [...diagnostics],
-      diagnosticsSummary: summarizeCandidateDiagnostics(diagnostics)
-    };
   }
 
   if (lastError) {
@@ -740,73 +549,9 @@ export async function resolvePreviewReplacementResult({
   throw error;
 }
 
-async function captureVisibleElementBlobOnce(
-  sendRuntimeMessage,
-  imageElement,
-  { forceScroll = false, forceRefresh = false } = {}
-) {
-  if (!sendRuntimeMessage) {
-    throw new Error('Visible-tab capture unavailable');
-  }
-
-  const rect = await ensureVisibleCaptureTargetInViewport(imageElement, { forceScroll });
-  const viewportRect = getViewportRect();
-  if (!isMeaningfulCaptureRect(rect)) {
-    throw new Error('Visible capture rect outside screenshot bounds');
-  }
-
-  const screenshotDataUrl = await requestVisibleTabCapture(sendRuntimeMessage, { forceRefresh });
-  const screenshot = await loadImageFromUrl(screenshotDataUrl);
-  const scaleX = screenshot.naturalWidth / Math.max(viewportRect.width, 1);
-  const scaleY = screenshot.naturalHeight / Math.max(viewportRect.height, 1);
-  const sx = Math.max(0, Math.floor(rect.left * scaleX));
-  const sy = Math.max(0, Math.floor(rect.top * scaleY));
-  if (sx >= screenshot.naturalWidth || sy >= screenshot.naturalHeight) {
-    throw new Error('Visible capture rect outside screenshot bounds');
-  }
-  const sw = Math.max(1, Math.min(screenshot.naturalWidth - sx, Math.ceil(rect.width * scaleX)));
-  const sh = Math.max(1, Math.min(screenshot.naturalHeight - sy, Math.ceil(rect.height * scaleY)));
-  if (sw < MIN_VISIBLE_CAPTURE_EDGE || sh < MIN_VISIBLE_CAPTURE_EDGE) {
-    throw new Error('Visible capture rect too small');
-  }
-
-  const canvas = document.createElement('canvas');
-  canvas.width = sw;
-  canvas.height = sh;
-  const context = canvas.getContext('2d');
-  if (!context) {
-    throw new Error('2D canvas context unavailable');
-  }
-
-  context.drawImage(screenshot, sx, sy, sw, sh, 0, 0, sw, sh);
-  return canvasToBlob(canvas);
-}
-
-async function captureVisibleElementBlob(sendRuntimeMessage, imageElement) {
-  try {
-    return await captureVisibleElementBlobOnce(sendRuntimeMessage, imageElement);
-  } catch (error) {
-    if (!shouldRetryVisibleCaptureError(error)) {
-      throw error;
-    }
-
-    await waitForFrames(2);
-
-    try {
-      return await captureVisibleElementBlobOnce(sendRuntimeMessage, imageElement, {
-        forceScroll: true,
-        forceRefresh: true
-      });
-    } catch (retryError) {
-      throw new Error(`Visible capture failed after retry: ${normalizeErrorMessage(retryError)}`);
-    }
-  }
-}
-
 export function buildPreviewReplacementCandidates({
   imageElement,
   sourceUrl = '',
-  sendRuntimeMessage,
   fetchPreviewBlob = fetchBlobViaPageBridge,
   captureRenderedImageBlob = imageElementToBlob
 }) {
@@ -815,16 +560,7 @@ export function buildPreviewReplacementCandidates({
     ? normalizeGoogleusercontentImageUrl(sourceUrl)
     : '';
 
-  if (typeof sendRuntimeMessage === 'function' && normalizedPreviewUrl) {
-    candidates.push({
-      strategy: 'background-fetch',
-      getOriginalBlob: () => fetchBlobFromBackground(
-        sendRuntimeMessage,
-        normalizedPreviewUrl,
-        typeof fetchPreviewBlob === 'function' ? fetchPreviewBlob : null
-      )
-    });
-  } else if (typeof fetchPreviewBlob === 'function' && normalizedPreviewUrl) {
+  if (typeof fetchPreviewBlob === 'function' && normalizedPreviewUrl) {
     candidates.push({
       strategy: 'page-fetch',
       getOriginalBlob: () => fetchPreviewBlob(normalizedPreviewUrl)
@@ -841,16 +577,123 @@ export function buildPreviewReplacementCandidates({
   return candidates;
 }
 
-function collectCandidateImages(root) {
+export async function processPreviewPageImageSource({
+  sourceUrl,
+  imageElement,
+  fetchPreviewBlob = fetchBlobViaPageBridge,
+  processWatermarkBlobImpl = processWatermarkBlob,
+  captureRenderedImageBlob = imageElementToBlob
+}) {
+  try {
+    const previewResult = await resolvePreviewReplacementResult({
+      candidates: buildPreviewReplacementCandidates({
+        imageElement,
+        sourceUrl,
+        fetchPreviewBlob,
+        captureRenderedImageBlob
+      }),
+      processCandidate: createPreviewCandidateProcessor(processWatermarkBlobImpl)
+    });
+
+    return {
+      skipped: false,
+      processedBlob: previewResult.processedBlob,
+      selectedStrategy: previewResult.strategy || '',
+      candidateDiagnostics: previewResult.diagnostics || null,
+      candidateDiagnosticsSummary: previewResult.diagnosticsSummary || ''
+    };
+  } catch (error) {
+    const diagnostics = getErrorCandidateDiagnostics(error) || [];
+    if (shouldSkipPreviewProcessingFailure(diagnostics)) {
+      return {
+        skipped: true,
+        reason: 'preview-fetch-unavailable',
+        candidateDiagnostics: diagnostics,
+        candidateDiagnosticsSummary: getErrorCandidateDiagnosticsSummary(error)
+      };
+    }
+    throw error;
+  }
+}
+
+export async function processOriginalPageImageSource({
+  sourceUrl,
+  imageElement,
+  fetchPreviewBlob = fetchBlobViaPageBridge,
+  removeWatermarkFromBlobImpl = removeWatermarkFromBlob,
+  captureRenderedImageBlob = imageElementToBlob,
+  fetchBlobDirectImpl = fetchBlobDirect,
+  validateBlob = loadImageFromBlob,
+  fetchBlobFromBackgroundImpl = fetchBlobFromBackground
+}) {
+  const originalBlob = await acquireOriginalBlob({
+    sourceUrl,
+    image: imageElement,
+    fetchBlobFromBackground: async (url) => fetchBlobFromBackgroundImpl(
+      normalizeGoogleusercontentImageUrl(url),
+      fetchPreviewBlob
+    ),
+    fetchBlobDirect: fetchBlobDirectImpl,
+    captureRenderedImageBlob,
+    validateBlob
+  });
+
+  return {
+    skipped: false,
+    processedBlob: await removeWatermarkFromBlobImpl(originalBlob),
+    selectedStrategy: '',
+    candidateDiagnostics: null,
+    candidateDiagnosticsSummary: ''
+  };
+}
+
+export async function processPageImageSource({
+  sourceUrl,
+  imageElement,
+  fetchPreviewBlob = fetchBlobViaPageBridge,
+  processWatermarkBlobImpl = processWatermarkBlob,
+  removeWatermarkFromBlobImpl = removeWatermarkFromBlob,
+  captureRenderedImageBlob = imageElementToBlob,
+  fetchBlobDirectImpl = fetchBlobDirect,
+  validateBlob = loadImageFromBlob,
+  fetchBlobFromBackgroundImpl = fetchBlobFromBackground
+}) {
+  if (isGeminiPreviewAssetUrl(sourceUrl)) {
+    return processPreviewPageImageSource({
+      sourceUrl,
+      imageElement,
+      fetchPreviewBlob,
+      processWatermarkBlobImpl,
+      captureRenderedImageBlob
+    });
+  }
+
+  return processOriginalPageImageSource({
+    sourceUrl,
+    imageElement,
+    fetchPreviewBlob,
+    removeWatermarkFromBlobImpl,
+    captureRenderedImageBlob,
+    fetchBlobDirectImpl,
+    validateBlob,
+    fetchBlobFromBackgroundImpl
+  });
+}
+
+function addProcessableCandidateImage(candidates, imageElement) {
+  if (isProcessableGeminiImageElement(imageElement)) {
+    candidates.add(imageElement);
+  }
+}
+
+export function collectCandidateImages(root) {
   const candidates = new Set();
-  if (root instanceof HTMLImageElement && isProcessableGeminiImageElement(root)) {
-    candidates.add(root);
+  if (root instanceof HTMLImageElement) {
+    addProcessableCandidateImage(candidates, root);
   }
   if (typeof root?.querySelectorAll === 'function') {
     for (const image of root.querySelectorAll(getGeminiImageQuerySelector())) {
-      if (isProcessableGeminiImageElement(image)) {
-        candidates.add(image);
-      }
+      addProcessableCandidateImage(candidates, image);
     }
   }
   return [...candidates];
@@ -911,16 +754,54 @@ export function shouldScheduleAttributeMutation(target, attributeName = '') {
     return true;
   }
 
+  return !isSelfWrittenProcessedImageSource(target);
+}
+
+export function isSelfWrittenProcessedImageSource(target) {
   const trackedObjectUrl = typeof target?.dataset?.[PAGE_IMAGE_OBJECT_URL_KEY] === 'string'
     ? target.dataset[PAGE_IMAGE_OBJECT_URL_KEY].trim()
     : '';
   if (!trackedObjectUrl) {
-    return true;
+    return false;
   }
 
   const currentSrc = typeof target?.currentSrc === 'string' ? target.currentSrc.trim() : '';
   const src = typeof target?.src === 'string' ? target.src.trim() : '';
-  return currentSrc !== trackedObjectUrl && src !== trackedObjectUrl;
+  return currentSrc === trackedObjectUrl || src === trackedObjectUrl;
+}
+
+export function handlePageImageMutations(mutations, {
+  scheduleProcess,
+  HTMLImageElementClass = globalThis.HTMLImageElement
+} = {}) {
+  if (typeof scheduleProcess !== 'function' || !Array.isArray(mutations) || mutations.length === 0) {
+    return;
+  }
+
+  const hasImageElementClass = typeof HTMLImageElementClass === 'function';
+
+  for (const mutation of mutations) {
+    if (mutation?.type === 'attributes') {
+      if (!hasImageElementClass || !(mutation.target instanceof HTMLImageElementClass)) {
+        continue;
+      }
+      if (!shouldScheduleAttributeMutation(mutation.target, mutation.attributeName)) {
+        continue;
+      }
+      scheduleProcess(mutation.target);
+      continue;
+    }
+
+    if (mutation?.type !== 'childList' || !mutation.addedNodes) {
+      continue;
+    }
+
+    for (const node of mutation.addedNodes) {
+      if (shouldScheduleMutationRoot(node)) {
+        scheduleProcess(node);
+      }
+    }
+  }
 }
 
 function scheduleOnNextFrame(callback) {
@@ -1145,11 +1026,214 @@ function revokeTrackedObjectUrl(imageElement) {
   delete imageElement.dataset[PAGE_IMAGE_OBJECT_URL_KEY];
 }
 
+function applySkippedImageState(imageElement) {
+  imageElement.dataset[PAGE_IMAGE_STATE_KEY] = 'skipped';
+  hideProcessingOverlay(imageElement, { removeImmediately: true });
+}
+
+function applyReadyImageState(imageElement, processedBlob) {
+  const objectUrl = URL.createObjectURL(processedBlob);
+  revokeTrackedObjectUrl(imageElement);
+  imageElement.dataset[PAGE_IMAGE_OBJECT_URL_KEY] = objectUrl;
+  imageElement.dataset[PAGE_IMAGE_STATE_KEY] = 'ready';
+  imageElement.src = objectUrl;
+  hideProcessingOverlay(imageElement);
+}
+
+function applyFailedImageState(imageElement) {
+  imageElement.dataset[PAGE_IMAGE_STATE_KEY] = 'failed';
+  hideProcessingOverlay(imageElement, { removeImmediately: true });
+}
+
+export function preparePageImageProcessing(imageElement, {
+  processing = null,
+  HTMLImageElementClass = globalThis.HTMLImageElement,
+  isProcessableImage = isProcessableGeminiImageElement,
+  resolveSourceUrl = resolveCandidateImageUrl,
+  hideProcessingOverlayImpl = hideProcessingOverlay,
+  revokeTrackedObjectUrlImpl = revokeTrackedObjectUrl,
+  showProcessingOverlayImpl = showProcessingOverlay
+} = {}) {
+  if (typeof HTMLImageElementClass !== 'function' || !(imageElement instanceof HTMLImageElementClass)) {
+    return null;
+  }
+  if (typeof isProcessableImage === 'function' && !isProcessableImage(imageElement)) {
+    return null;
+  }
+
+  const sourceUrl = typeof resolveSourceUrl === 'function'
+    ? String(resolveSourceUrl(imageElement) || '').trim()
+    : '';
+  if (!sourceUrl) {
+    return null;
+  }
+
+  const dataset = imageElement.dataset || (imageElement.dataset = {});
+  const lastSourceUrl = dataset[PAGE_IMAGE_SOURCE_KEY] || '';
+  const lastState = dataset[PAGE_IMAGE_STATE_KEY] || '';
+  if (lastSourceUrl === sourceUrl && lastState === 'ready') {
+    return null;
+  }
+  if (typeof processing?.has === 'function' && processing.has(imageElement)) {
+    return null;
+  }
+
+  if (lastSourceUrl && lastSourceUrl !== sourceUrl) {
+    hideProcessingOverlayImpl(imageElement, { removeImmediately: true });
+    revokeTrackedObjectUrlImpl(imageElement);
+  }
+
+  if (typeof processing?.add === 'function') {
+    processing.add(imageElement);
+  }
+
+  dataset.gwrStableSource = sourceUrl;
+  dataset[PAGE_IMAGE_SOURCE_KEY] = sourceUrl;
+  dataset[PAGE_IMAGE_STATE_KEY] = 'processing';
+  showProcessingOverlayImpl(imageElement);
+
+  return {
+    sourceUrl,
+    normalizedUrl: normalizeGoogleusercontentImageUrl(sourceUrl),
+    isPreviewSource: isGeminiPreviewAssetUrl(sourceUrl)
+  };
+}
+
+export function emitPageImageProcessingStart({
+  logger = console,
+  onLog = null,
+  sourceUrl,
+  normalizedUrl,
+  isPreviewSource = false
+} = {}) {
+  emitPageImageProcessEvent({
+    logger,
+    onLog,
+    consoleMessage: '[Gemini Watermark Remover] page image process start',
+    eventType: 'page-image-process-start',
+    payload: {
+      sourceUrl,
+      normalizedUrl
+    }
+  });
+
+  if (!isPreviewSource) {
+    return;
+  }
+
+  emitPageImageProcessEvent({
+    logger,
+    onLog,
+    consoleMessage: '[Gemini Watermark Remover] page image process strategy',
+    eventType: 'page-image-process-strategy',
+    payload: {
+      sourceUrl,
+      strategy: 'preview-candidate-fallback'
+    }
+  });
+}
+
+export function applyPageImageProcessingResult({
+  imageElement,
+  sourceUrl,
+  normalizedUrl,
+  isPreviewSource = false,
+  sourceResult,
+  logger = console,
+  onLog = null
+} = {}) {
+  if (sourceResult?.skipped) {
+    applySkippedImageState(imageElement);
+    emitPageImageProcessEvent({
+      logger,
+      onLog,
+      consoleMessage: '[Gemini Watermark Remover] page image process skipped',
+      eventType: 'page-image-process-skipped',
+      payload: {
+        sourceUrl,
+        normalizedUrl,
+        reason: sourceResult.reason || 'preview-fetch-unavailable',
+        candidateDiagnostics: sourceResult.candidateDiagnostics,
+        candidateDiagnosticsSummary: sourceResult.candidateDiagnosticsSummary || ''
+      }
+    });
+    return;
+  }
+
+  const processedBlob = sourceResult?.processedBlob;
+  const selectedStrategy = sourceResult?.selectedStrategy || '';
+  const candidateDiagnostics = sourceResult?.candidateDiagnostics || null;
+  const candidateDiagnosticsSummary = sourceResult?.candidateDiagnosticsSummary || '';
+
+  applyReadyImageState(imageElement, processedBlob);
+
+  emitPageImageProcessEvent({
+    logger,
+    onLog,
+    consoleMessage: '[Gemini Watermark Remover] page image process success',
+    eventType: 'page-image-process-success',
+    payload: {
+      sourceUrl,
+      normalizedUrl,
+      strategy: selectedStrategy || (isPreviewSource ? 'preview-candidate' : 'default'),
+      candidateDiagnostics,
+      candidateDiagnosticsSummary,
+      blobType: processedBlob?.type || '',
+      blobSize: processedBlob?.size || 0
+    }
+  });
+}
+
+export function handlePageImageProcessingFailure({
+  imageElement,
+  sourceUrl,
+  normalizedUrl,
+  error,
+  logger = console,
+  onLog = null
+} = {}) {
+  emitPageImageProcessEvent({
+    logger,
+    onLog,
+    level: 'warn',
+    consoleMessage: '[Gemini Watermark Remover] page image process failed',
+    eventType: 'page-image-process-failed',
+    payload: {
+      sourceUrl,
+      normalizedUrl,
+      error: normalizeErrorMessage(error),
+      candidateDiagnostics: getErrorCandidateDiagnostics(error),
+      candidateDiagnosticsSummary: getErrorCandidateDiagnosticsSummary(error)
+    }
+  });
+  applyFailedImageState(imageElement);
+}
+
+export function buildPageImageSourceRequest({
+  sourceUrl,
+  imageElement,
+  fetchPreviewBlob,
+  processWatermarkBlobImpl,
+  removeWatermarkFromBlobImpl
+} = {}) {
+  return {
+    sourceUrl,
+    imageElement,
+    fetchPreviewBlob,
+    processWatermarkBlobImpl,
+    removeWatermarkFromBlobImpl,
+    captureRenderedImageBlob: imageElementToBlob,
+    fetchBlobDirectImpl: fetchBlobDirect,
+    validateBlob: loadImageFromBlob,
+    fetchBlobFromBackgroundImpl: fetchBlobFromBackground
+  };
+}
+
 export function createPageImageReplacementController({
   logger = console,
   onLog = null,
-  sendRuntimeMessage = buildRuntimeMessageSender(),
   fetchPreviewBlob = fetchBlobViaPageBridge,
+  processPageImageSourceImpl = processPageImageSource,
   processWatermarkBlobImpl = processWatermarkBlob,
   removeWatermarkFromBlobImpl = removeWatermarkFromBlob
 } = {}) {
@@ -1157,185 +1241,44 @@ export function createPageImageReplacementController({
   let observer = null;
 
   async function processImage(imageElement) {
-    if (!(imageElement instanceof HTMLImageElement)) return;
-    if (!isProcessableGeminiImageElement(imageElement)) return;
+    const context = preparePageImageProcessing(imageElement, { processing });
+    if (!context) return;
 
-    const sourceUrl = resolveCandidateImageUrl(imageElement).trim();
-    if (!sourceUrl) return;
-
-    const lastSourceUrl = imageElement.dataset[PAGE_IMAGE_SOURCE_KEY] || '';
-    const lastState = imageElement.dataset[PAGE_IMAGE_STATE_KEY] || '';
-    if (lastSourceUrl === sourceUrl && lastState === 'ready') return;
-    if (processing.has(imageElement)) return;
-
-    if (lastSourceUrl && lastSourceUrl !== sourceUrl) {
-      hideProcessingOverlay(imageElement, { removeImmediately: true });
-      revokeTrackedObjectUrl(imageElement);
-    }
-
-    processing.add(imageElement);
-    imageElement.dataset.gwrStableSource = sourceUrl;
-    imageElement.dataset[PAGE_IMAGE_SOURCE_KEY] = sourceUrl;
-    imageElement.dataset[PAGE_IMAGE_STATE_KEY] = 'processing';
-    showProcessingOverlay(imageElement);
-
-    const normalizedUrl = normalizeGoogleusercontentImageUrl(sourceUrl);
-    logger?.info?.('[Gemini Watermark Remover] page image process start', {
+    const { sourceUrl, normalizedUrl, isPreviewSource } = context;
+    emitPageImageProcessingStart({
+      logger,
+      onLog,
       sourceUrl,
-      normalizedUrl
+      normalizedUrl,
+      isPreviewSource
     });
-    appendLog(onLog, 'page-image-process-start', {
-      sourceUrl,
-      normalizedUrl
-    });
-
-    if (isGeminiPreviewUrl(sourceUrl)) {
-      logger?.info?.('[Gemini Watermark Remover] page image process strategy', {
-        sourceUrl,
-        strategy: 'preview-candidate-fallback'
-      });
-      appendLog(onLog, 'page-image-process-strategy', {
-        sourceUrl,
-        strategy: 'preview-candidate-fallback'
-      });
-    }
 
     try {
-      let processedBlob = null;
-      let selectedStrategy = '';
-      let candidateDiagnostics = null;
-      let candidateDiagnosticsSummary = '';
-      let skippedReason = '';
-      if (isGeminiPreviewUrl(sourceUrl)) {
-        try {
-          const previewResult = await resolvePreviewReplacementResult({
-            candidates: buildPreviewReplacementCandidates({
-              imageElement,
-              sourceUrl,
-              sendRuntimeMessage,
-              fetchPreviewBlob,
-              captureRenderedImageBlob: imageElementToBlob
-            }),
-            processCandidate: async (candidate) => {
-              const originalBlob = await candidate.getOriginalBlob();
-              try {
-                const processedResult = await processWatermarkBlobImpl(originalBlob);
-                return {
-                  ...processedResult,
-                  sourceBlobType: originalBlob.type || '',
-                  sourceBlobSize: originalBlob.size || 0
-                };
-              } catch (error) {
-                if (error && typeof error === 'object') {
-                  error.sourceBlobType = originalBlob.type || '';
-                  error.sourceBlobSize = originalBlob.size || 0;
-                }
-                throw error;
-              }
-            }
-          });
-          processedBlob = previewResult.processedBlob;
-          selectedStrategy = previewResult.strategy;
-          candidateDiagnostics = previewResult.diagnostics || null;
-          candidateDiagnosticsSummary = previewResult.diagnosticsSummary || '';
-        } catch (error) {
-          const diagnostics = Array.isArray(error?.candidateDiagnostics) ? error.candidateDiagnostics : [];
-          const visibleOnlyInsufficient = diagnostics.length === 1
-            && diagnostics[0]?.strategy === 'visible-capture'
-            && diagnostics[0]?.status === 'insufficient';
-          const shouldSkipPreviewFailure = visibleOnlyInsufficient
-            || shouldSkipPreviewProcessingFailure(diagnostics);
-          if (shouldSkipPreviewFailure) {
-            imageElement.dataset[PAGE_IMAGE_STATE_KEY] = 'skipped';
-            hideProcessingOverlay(imageElement, { removeImmediately: true });
-            skippedReason = visibleOnlyInsufficient
-              ? 'visible-capture-insufficient'
-              : 'preview-fetch-unavailable';
-            logger?.info?.('[Gemini Watermark Remover] page image process skipped', {
-              sourceUrl,
-              normalizedUrl,
-              reason: skippedReason,
-              candidateDiagnostics: diagnostics,
-              candidateDiagnosticsSummary: typeof error?.candidateDiagnosticsSummary === 'string'
-                ? error.candidateDiagnosticsSummary
-                : ''
-            });
-            appendLog(onLog, 'page-image-process-skipped', {
-              sourceUrl,
-              normalizedUrl,
-              reason: skippedReason,
-              candidateDiagnostics: diagnostics,
-              candidateDiagnosticsSummary: typeof error?.candidateDiagnosticsSummary === 'string'
-                ? error.candidateDiagnosticsSummary
-                : ''
-            });
-            return;
-          }
-          throw error;
-        }
-      } else {
-        const originalBlob = await acquireOriginalBlob({
-          sourceUrl,
-          image: imageElement,
-          fetchBlobFromBackground: async (url) => fetchBlobFromBackground(
-            sendRuntimeMessage,
-            normalizeGoogleusercontentImageUrl(url),
-            fetchPreviewBlob
-          ),
-          fetchBlobDirect,
-          captureRenderedImageBlob: imageElementToBlob,
-          captureVisibleElementBlob: async (image) => captureVisibleElementBlob(sendRuntimeMessage, image),
-          validateBlob: loadImageFromBlob
-        });
+      const sourceResult = await processPageImageSourceImpl(buildPageImageSourceRequest({
+        sourceUrl,
+        imageElement,
+        fetchPreviewBlob,
+        processWatermarkBlobImpl,
+        removeWatermarkFromBlobImpl
+      }));
 
-        processedBlob = await removeWatermarkFromBlobImpl(originalBlob);
-      }
-
-      const objectUrl = URL.createObjectURL(processedBlob);
-      revokeTrackedObjectUrl(imageElement);
-      imageElement.dataset[PAGE_IMAGE_OBJECT_URL_KEY] = objectUrl;
-      imageElement.dataset[PAGE_IMAGE_STATE_KEY] = 'ready';
-      imageElement.src = objectUrl;
-      hideProcessingOverlay(imageElement);
-
-      logger?.info?.('[Gemini Watermark Remover] page image process success', {
+      applyPageImageProcessingResult({
+        imageElement,
+        logger,
+        onLog,
         sourceUrl,
         normalizedUrl,
-        strategy: selectedStrategy || (isGeminiPreviewUrl(sourceUrl) ? 'preview-candidate' : 'default'),
-        candidateDiagnostics,
-        candidateDiagnosticsSummary,
-        blobType: processedBlob.type || '',
-        blobSize: processedBlob.size || 0
-      });
-      appendLog(onLog, 'page-image-process-success', {
-        sourceUrl,
-        normalizedUrl,
-        strategy: selectedStrategy || (isGeminiPreviewUrl(sourceUrl) ? 'preview-candidate' : 'default'),
-        candidateDiagnostics,
-        candidateDiagnosticsSummary,
-        blobType: processedBlob.type || '',
-        blobSize: processedBlob.size || 0
+        isPreviewSource,
+        sourceResult
       });
     } catch (error) {
-      const candidateDiagnostics = Array.isArray(error?.candidateDiagnostics) ? error.candidateDiagnostics : null;
-      const candidateDiagnosticsSummary = typeof error?.candidateDiagnosticsSummary === 'string'
-        ? error.candidateDiagnosticsSummary
-        : '';
-      imageElement.dataset[PAGE_IMAGE_STATE_KEY] = 'failed';
-      hideProcessingOverlay(imageElement, { removeImmediately: true });
-      logger?.warn?.('[Gemini Watermark Remover] page image process failed', {
+      handlePageImageProcessingFailure({
+        imageElement,
+        logger,
+        onLog,
         sourceUrl,
         normalizedUrl,
-        error: normalizeErrorMessage(error),
-        candidateDiagnostics,
-        candidateDiagnosticsSummary
-      });
-      appendLog(onLog, 'page-image-process-failed', {
-        sourceUrl,
-        normalizedUrl,
-        error: normalizeErrorMessage(error),
-        candidateDiagnostics,
-        candidateDiagnosticsSummary
+        error
       });
     } finally {
       processing.delete(imageElement);
@@ -1354,20 +1297,10 @@ export function createPageImageReplacementController({
     const root = document.body || document.documentElement;
     if (!root || observer) return;
     observer = new MutationObserver((mutations) => {
-      for (const mutation of mutations) {
-        if (mutation.type === 'attributes' && mutation.target instanceof HTMLImageElement) {
-          if (!shouldScheduleAttributeMutation(mutation.target, mutation.attributeName)) {
-            continue;
-          }
-          scheduleProcess(mutation.target);
-          continue;
-        }
-        for (const node of mutation.addedNodes) {
-          if (shouldScheduleMutationRoot(node)) {
-            scheduleProcess(node);
-          }
-        }
-      }
+      handlePageImageMutations(mutations, {
+        scheduleProcess,
+        HTMLImageElementClass: HTMLImageElement
+      });
     });
     observer.observe(root, {
       childList: true,
