@@ -26,7 +26,8 @@ export async function acquireOriginalBlob({
   fetchBlobDirect,
   captureRenderedImageBlob,
   validateBlob,
-  preferRenderedCaptureForPreview = true
+  preferRenderedCaptureForPreview = true,
+  allowRenderedCaptureFallbackOnValidationFailure = true
 }) {
   const normalizedSourceUrl = typeof sourceUrl === 'string' ? sourceUrl.trim() : '';
 
@@ -42,7 +43,10 @@ export async function acquireOriginalBlob({
     if (typeof validateBlob === 'function') {
       try {
         await validateBlob(blob);
-      } catch {
+      } catch (error) {
+        if (!allowRenderedCaptureFallbackOnValidationFailure) {
+          throw error;
+        }
         return captureRenderedBlob({
           image,
           captureRenderedImageBlob

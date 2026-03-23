@@ -55,7 +55,8 @@ async function defaultResolveDownloadBlob({
     imageElement,
     fetchPreviewBlob,
     removeWatermarkFromBlobImpl,
-    preferRenderedCaptureForPreview: false
+    preferRenderedCaptureForPreview: false,
+    allowRenderedCaptureFallbackOnValidationFailure: false
   });
   return result.processedBlob;
 }

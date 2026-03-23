@@ -627,7 +627,8 @@ export async function processOriginalPageImageSource({
   fetchBlobDirectImpl = fetchBlobDirect,
   validateBlob = loadImageFromBlob,
   fetchBlobFromBackgroundImpl = fetchBlobFromBackground,
-  preferRenderedCaptureForPreview = true
+  preferRenderedCaptureForPreview = true,
+  allowRenderedCaptureFallbackOnValidationFailure = true
 }) {
   const originalBlob = await acquireOriginalBlob({
     sourceUrl,
@@ -639,7 +640,8 @@ export async function processOriginalPageImageSource({
     fetchBlobDirect: fetchBlobDirectImpl,
     captureRenderedImageBlob,
     validateBlob,
-    preferRenderedCaptureForPreview
+    preferRenderedCaptureForPreview,
+    allowRenderedCaptureFallbackOnValidationFailure
   });
 
   return {

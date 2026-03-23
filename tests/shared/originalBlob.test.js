@@ -221,6 +221,44 @@ test('acquireOriginalBlob should fall back to rendered capture when Gemini asset
   ]);
 });
 
+test('acquireOriginalBlob should surface validation failure without rendered capture when fallback is disabled', async () => {
+  const invalidBlob = new Blob(['invalid'], { type: 'text/plain' });
+  const fixtureImage = { id: 'fixture-image' };
+  const calls = [];
+
+  await assert.rejects(
+    () => acquireOriginalBlob({
+      sourceUrl: 'https://lh3.googleusercontent.com/gg/example-token=s1024-rj',
+      image: fixtureImage,
+      fetchBlobFromBackground: async (url) => {
+        calls.push(['background', url]);
+        return invalidBlob;
+      },
+      fetchBlobDirect: async () => {
+        throw new Error('direct fetch should not be used');
+      },
+      validateBlob: async (blob) => {
+        calls.push(['validate', blob]);
+        throw new Error('blob decode failed');
+      },
+      captureRenderedImageBlob: async (image) => {
+        calls.push(['capture', image]);
+        return new Blob(['capture'], { type: 'image/png' });
+      },
+      preferRenderedCaptureForPreview: false,
+      allowRenderedCaptureFallbackOnValidationFailure: false
+    }),
+    {
+      message: /blob decode failed/i
+    }
+  );
+
+  assert.deepEqual(calls, [
+    ['background', 'https://lh3.googleusercontent.com/gg/example-token=s1024-rj'],
+    ['validate', invalidBlob]
+  ]);
+});
+
 test('acquireOriginalBlob should fetch blob urls directly in the page context', async () => {
   const directBlob = new Blob(['direct'], { type: 'image/png' });
   const calls = [];
