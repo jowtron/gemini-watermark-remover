@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  extractGeminiImageAssetIds,
   getGeminiImageQuerySelector,
   getPreferredGeminiImageContainer,
   resolveCandidateImageUrl,
@@ -198,4 +199,56 @@ test('getPreferredGeminiImageContainer should fallback to a nearby block ancesto
   };
 
   assert.equal(getPreferredGeminiImageContainer(img), inner);
+});
+
+test('extractGeminiImageAssetIds should read response, draft, and conversation ids from nearby Gemini image metadata', () => {
+  const singleImage = {
+    getAttribute(name) {
+      if (name === 'jslog') {
+        return '185864;track:generic_click,impression,attention;BardVeMetadataKey:[["r_d7ef418292ede05c","c_cdec91057e5fdcaf",null,"rc_2315ec0b5621fce5"]];mutable:true';
+      }
+      return '';
+    },
+    closest: () => null,
+    parentElement: null
+  };
+
+  const image = {
+    dataset: {},
+    parentElement: singleImage,
+    closest(selector) {
+      if (selector === 'single-image') return singleImage;
+      if (selector === '[data-test-draft-id]') {
+        return {
+          getAttribute(name) {
+            return name === 'data-test-draft-id' ? 'rc_2315ec0b5621fce5' : '';
+          },
+          closest: () => null,
+          parentElement: null
+        };
+      }
+      if (selector === 'generated-image,.generated-image-container') return {};
+      return null;
+    }
+  };
+
+  assert.deepEqual(extractGeminiImageAssetIds(image), {
+    responseId: 'r_d7ef418292ede05c',
+    draftId: 'rc_2315ec0b5621fce5',
+    conversationId: 'c_cdec91057e5fdcaf'
+  });
+});
+
+test('extractGeminiImageAssetIds should return null fields when nearby metadata is unavailable', () => {
+  const image = {
+    dataset: {},
+    parentElement: null,
+    closest: () => null
+  };
+
+  assert.deepEqual(extractGeminiImageAssetIds(image), {
+    responseId: null,
+    draftId: null,
+    conversationId: null
+  });
 });

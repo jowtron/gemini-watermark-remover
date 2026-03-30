@@ -12,10 +12,19 @@ test('userscript entry should install download hook and page image replacement w
   const source = loadModuleSource('../../src/userscript/index.js', import.meta.url);
 
   assert.equal(hasImportedBinding(source, './downloadHook.js', 'installGeminiDownloadHook'), true);
+  assert.equal(hasImportedBinding(source, './downloadHook.js', 'createGeminiDownloadRpcFetchHook'), true);
   assert.equal(hasImportedBinding(source, '../shared/pageImageReplacement.js', 'installPageImageReplacement'), true);
   assert.equal(hasImportedBinding(source, './processBridge.js', 'installUserscriptProcessBridge'), true);
-  assert.equal(hasImportedBinding(source, './processBridge.js', 'createUserscriptProcessBridgeClient'), true);
+   assert.equal(hasImportedBinding(source, './pageProcessBridge.js', 'createPageProcessBridgeClient'), true);
+   assert.equal(hasImportedBinding(source, './pageProcessorRuntime.js', 'installInjectedPageProcessorRuntime'), true);
   assert.equal(hasImportedBinding(source, './downloadClick.js', 'installGeminiDownloadClickHandler'), false);
+});
+
+test('userscript entry should skip initialization inside nested frames', () => {
+  const source = loadModuleSource('../../src/userscript/index.js', import.meta.url);
+
+  assert.match(normalizeWhitespace(source), /function shouldSkipFrame\(targetWindow\)/);
+  assert.match(normalizeWhitespace(source), /if \(shouldSkipFrame\(targetWindow\)\) \{ return; \}/);
 });
 
 test('userscript entry should explicitly pass GM_xmlhttpRequest to preview fetching', () => {
@@ -39,14 +48,20 @@ test('userscript entry should verify inline worker readiness before enabling acc
   assert.match(normalizeWhitespace(source), /Worker initialization failed,\s*using main thread/);
 });
 
-test('userscript entry should route preview processing through the shared bridge client', () => {
+test('userscript entry should route page image processing through page runtime bridge with processingRuntime fallback', () => {
   const source = loadModuleSource('../../src/userscript/index.js', import.meta.url);
   const installDownloadHookCall = normalizeWhitespace(getCallSource(source, 'installGeminiDownloadHook'));
+  const installDownloadRpcHookCall = normalizeWhitespace(getCallSource(source, 'createGeminiDownloadRpcFetchHook'));
   const installPageReplacementCall = normalizeWhitespace(getCallSource(source, 'installPageImageReplacement'));
 
-  assert.match(installDownloadHookCall, /processBlob:\s*processingRuntime\.removeWatermarkFromBlob/);
-  assert.match(installPageReplacementCall, /processWatermarkBlobImpl:\s*bridgeClient\.processWatermarkBlob/);
-  assert.match(installPageReplacementCall, /removeWatermarkFromBlobImpl:\s*bridgeClient\.removeWatermarkFromBlob/);
+  assert.equal(hasImportedBinding(source, './urlUtils.js', 'isGeminiOriginalAssetUrl'), true);
+  assert.match(normalizeWhitespace(source), /await installInjectedPageProcessorRuntime\(/);
+  assert.match(installDownloadHookCall, /isTargetUrl:\s*isGeminiOriginalAssetUrl/);
+  assert.match(installDownloadRpcHookCall, /getIntentMetadata:\s*\(\)\s*=>\s*downloadIntentGate\.getRecentIntentMetadata\(\)/);
+  assert.match(installDownloadHookCall, /processBlob:\s*pageProcessClient\.removeWatermarkFromBlob/);
+  assert.match(installPageReplacementCall, /processWatermarkBlobImpl:\s*pageProcessClient\.processWatermarkBlob/);
+  assert.match(installPageReplacementCall, /removeWatermarkFromBlobImpl:\s*pageProcessClient\.removeWatermarkFromBlob/);
+  assert.doesNotMatch(installPageReplacementCall, /bridgeClient\./);
 });
 
 test('userscript entry should delegate watermark runtime logic to processingRuntime module', () => {

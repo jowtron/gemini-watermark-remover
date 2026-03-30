@@ -4,6 +4,76 @@ const GEMINI_IMAGE_CONTAINER_SELECTOR = 'generated-image,.generated-image-contai
 const MIN_GEMINI_IMAGE_EDGE = 128;
 const MAX_CONTAINER_SEARCH_DEPTH = 4;
 const MIN_ACTION_BUTTONS = 3;
+const GEMINI_DRAFT_ID_ATTRIBUTE = 'data-test-draft-id';
+
+function normalizeGeminiAssetId(value, prefix) {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed.startsWith(prefix) || trimmed.length <= prefix.length) {
+    return null;
+  }
+  return trimmed;
+}
+
+function parseGeminiAssetIdsFromJslog(jslog = '') {
+  if (typeof jslog !== 'string' || jslog.length === 0) {
+    return null;
+  }
+
+  const responseId = normalizeGeminiAssetId(jslog.match(/"((?:r|resp)_[^"]+)"/)?.[1] || null, 'r_');
+  const conversationId = normalizeGeminiAssetId(jslog.match(/"((?:c|conv)_[^"]+)"/)?.[1] || null, 'c_');
+  const draftId = normalizeGeminiAssetId(jslog.match(/"((?:rc|draft)_[^"]+)"/)?.[1] || null, 'rc_');
+
+  if (!responseId && !conversationId && !draftId) {
+    return null;
+  }
+
+  return {
+    responseId,
+    draftId,
+    conversationId
+  };
+}
+
+function getAttributeValue(element, attributeName) {
+  if (!element || typeof element.getAttribute !== 'function') {
+    return '';
+  }
+  return String(element.getAttribute(attributeName) || '').trim();
+}
+
+function getClosestElement(element, selector) {
+  if (!element || typeof element.closest !== 'function') {
+    return null;
+  }
+  return element.closest(selector);
+}
+
+function collectGeminiMetadataElements(img) {
+  const elements = [];
+  const seen = new Set();
+
+  const pushElement = (element) => {
+    if (!element || typeof element !== 'object' || seen.has(element)) return;
+    seen.add(element);
+    elements.push(element);
+  };
+
+  pushElement(img);
+  pushElement(getClosestElement(img, 'single-image'));
+  pushElement(getClosestElement(img, `[${GEMINI_DRAFT_ID_ATTRIBUTE}]`));
+  pushElement(getClosestElement(img, GEMINI_IMAGE_CONTAINER_SELECTOR));
+
+  let current = img?.parentElement || null;
+  let depth = 0;
+  while (current && depth < MAX_CONTAINER_SEARCH_DEPTH) {
+    pushElement(current);
+    current = current.parentElement || null;
+    depth += 1;
+  }
+
+  return elements;
+}
 
 function getMediaEdgeSize(element) {
   const naturalWidth = Number(element?.naturalWidth) || 0;
@@ -101,6 +171,48 @@ export function getPreferredGeminiImageContainer(img) {
   }
 
   return img.parentElement || null;
+}
+
+export function extractGeminiImageAssetIds(img) {
+  const assetIds = {
+    responseId: null,
+    draftId: null,
+    conversationId: null
+  };
+
+  if (!img || typeof img !== 'object') {
+    return assetIds;
+  }
+
+  const draftIdFromDataset = normalizeGeminiAssetId(
+    typeof img?.dataset?.gwrDraftId === 'string' ? img.dataset.gwrDraftId : null,
+    'rc_'
+  );
+  if (draftIdFromDataset) {
+    assetIds.draftId = draftIdFromDataset;
+  }
+
+  for (const element of collectGeminiMetadataElements(img)) {
+    if (!assetIds.draftId) {
+      assetIds.draftId = normalizeGeminiAssetId(
+        getAttributeValue(element, GEMINI_DRAFT_ID_ATTRIBUTE),
+        'rc_'
+      );
+    }
+
+    const parsed = parseGeminiAssetIdsFromJslog(getAttributeValue(element, 'jslog'));
+    if (!parsed) continue;
+
+    assetIds.responseId ||= parsed.responseId;
+    assetIds.draftId ||= parsed.draftId;
+    assetIds.conversationId ||= parsed.conversationId;
+
+    if (assetIds.responseId && assetIds.draftId && assetIds.conversationId) {
+      break;
+    }
+  }
+
+  return assetIds;
 }
 
 export function hasNearbyActionCluster(img) {

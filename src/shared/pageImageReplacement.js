@@ -7,6 +7,7 @@ import {
 import { normalizeErrorMessage } from './errorUtils.js';
 import { acquireOriginalBlob } from './originalBlob.js';
 import {
+  extractGeminiImageAssetIds,
   getGeminiImageContainerSelector,
   getGeminiImageQuerySelector,
   getPreferredGeminiImageContainer,
@@ -21,13 +22,22 @@ const PAGE_IMAGE_OBJECT_URL_KEY = 'gwrWatermarkObjectUrl';
 const PROCESSING_OVERLAY_DATA_KEY = 'gwrProcessingOverlay';
 const PROCESSING_VISUAL_DATA_KEY = 'gwrProcessingVisual';
 const PREVIEW_OVERLAY_DATA_KEY = 'gwrPreviewImage';
+const PAGE_IMAGE_RESPONSE_ID_KEY = 'gwrResponseId';
+const PAGE_IMAGE_DRAFT_ID_KEY = 'gwrDraftId';
+const PAGE_IMAGE_CONVERSATION_ID_KEY = 'gwrConversationId';
 const OBSERVED_ATTRIBUTES = ['src', 'srcset', 'data-gwr-source-url'];
 const PAGE_FETCH_REQUEST = 'gwr:page-fetch-request';
 const PAGE_FETCH_RESPONSE = 'gwr:page-fetch-response';
 const PROCESSING_OVERLAY_FADE_MS = 180;
+const PREVIEW_IMAGE_RENDER_RETRY_MS = 1500;
 const MIN_VISIBLE_CAPTURE_EDGE = 32;
 const MIN_VISIBLE_CAPTURE_AREA = MIN_VISIBLE_CAPTURE_EDGE * MIN_VISIBLE_CAPTURE_EDGE;
 const CONTAINER_CAPTURE_AREA_RATIO = 4;
+const PREVIEW_PAGE_IMAGE_PROCESSING_OPTIONS = Object.freeze({
+  adaptiveMode: 'never',
+  maxPasses: 1,
+  processingProfile: 'preview-fast'
+});
 
 const processingOverlayState = new WeakMap();
 const previewOverlayState = new WeakMap();
@@ -36,6 +46,10 @@ function appendLog(onLog, type, payload = {}) {
   if (typeof onLog === 'function') {
     onLog(type, payload);
   }
+}
+
+function isBlobPageImageSource(sourceUrl = '') {
+  return typeof sourceUrl === 'string' && sourceUrl.startsWith('blob:');
 }
 
 function emitPageImageProcessEvent({
@@ -50,6 +64,13 @@ function emitPageImageProcessEvent({
   appendLog(onLog, eventType, payload);
 }
 
+function nowMs() {
+  if (typeof globalThis.performance?.now === 'function') {
+    return globalThis.performance.now();
+  }
+  return Date.now();
+}
+
 function getErrorCandidateDiagnostics(error) {
   return Array.isArray(error?.candidateDiagnostics) ? error.candidateDiagnostics : null;
 }
@@ -60,13 +81,18 @@ function getErrorCandidateDiagnosticsSummary(error) {
     : '';
 }
 
-function createPreviewCandidateProcessor(processWatermarkBlobImpl) {
+function createPreviewCandidateProcessor(processWatermarkBlobImpl, processingOptions = null) {
   return async (candidate) => {
     const originalBlob = await candidate.getOriginalBlob();
     try {
-      const processedResult = await processWatermarkBlobImpl(originalBlob);
+      const captureTiming = originalBlob?.__gwrCaptureTiming || null;
+      const processedResult = await processWatermarkBlobImpl(
+        originalBlob,
+        processingOptions ? { ...processingOptions } : undefined
+      );
       return {
         ...processedResult,
+        captureTiming,
         sourceBlobType: originalBlob.type || '',
         sourceBlobSize: originalBlob.size || 0
       };
@@ -147,7 +173,10 @@ async function fetchBlobViaPageBridge(url, timeoutMs = 15000) {
 }
 
 async function imageElementToBlob(imageElement) {
+  const startedAt = nowMs();
+  const waitStartedAt = nowMs();
   const { width, height } = await waitForRenderableImageSize(imageElement);
+  const waitRenderableMs = nowMs() - waitStartedAt;
 
   const canvas = document.createElement('canvas');
   canvas.width = width;
@@ -156,8 +185,21 @@ async function imageElementToBlob(imageElement) {
   if (!context) {
     throw new Error('2D canvas context unavailable');
   }
+  const drawStartedAt = nowMs();
   context.drawImage(imageElement, 0, 0, width, height);
-  return canvasToBlob(canvas);
+  const drawMs = nowMs() - drawStartedAt;
+  const encodeStartedAt = nowMs();
+  const blob = await canvasToBlob(canvas);
+  const encodeMs = nowMs() - encodeStartedAt;
+  blob.__gwrCaptureTiming = {
+    waitRenderableMs,
+    drawMs,
+    encodeMs,
+    totalMs: nowMs() - startedAt,
+    width,
+    height
+  };
+  return blob;
 }
 
 function normalizeCaptureRect(rect) {
@@ -388,6 +430,12 @@ function getRenderableImageSize(imageElement) {
   return { width, height };
 }
 
+function isPreviewImageRenderable(imageElement) {
+  return Boolean(imageElement?.complete)
+    && (Number(imageElement?.naturalWidth) || 0) > 0
+    && (Number(imageElement?.naturalHeight) || 0) > 0;
+}
+
 export async function waitForRenderableImageSize(imageElement, timeoutMs = 1500) {
   let size = getRenderableImageSize(imageElement);
   if (size.width > 0 && size.height > 0) {
@@ -488,6 +536,7 @@ export async function resolvePreviewReplacementResult({
         strategy: candidate.strategy || '',
         status: confirmed ? 'confirmed' : 'insufficient',
         decisionTier,
+        captureTiming: result?.captureTiming || null,
         processorPath: typeof result?.processedMeta?.processorPath === 'string' ? result.processedMeta.processorPath : '',
         sourceBlobType: result?.sourceBlobType || '',
         sourceBlobSize: typeof result?.sourceBlobSize === 'number' ? result.sourceBlobSize : undefined,
@@ -594,7 +643,10 @@ export async function processPreviewPageImageSource({
         fetchPreviewBlob,
         captureRenderedImageBlob
       }),
-      processCandidate: createPreviewCandidateProcessor(processWatermarkBlobImpl)
+      processCandidate: createPreviewCandidateProcessor(
+        processWatermarkBlobImpl,
+        PREVIEW_PAGE_IMAGE_PROCESSING_OPTIONS
+      )
     });
 
     return {
@@ -602,7 +654,8 @@ export async function processPreviewPageImageSource({
       processedBlob: previewResult.processedBlob,
       selectedStrategy: previewResult.strategy || '',
       candidateDiagnostics: previewResult.diagnostics || null,
-      candidateDiagnosticsSummary: previewResult.diagnosticsSummary || ''
+      candidateDiagnosticsSummary: previewResult.diagnosticsSummary || '',
+      captureTiming: previewResult.captureTiming || null
     };
   } catch (error) {
     const diagnostics = getErrorCandidateDiagnostics(error) || [];
@@ -641,6 +694,7 @@ export async function processOriginalPageImageSource({
     captureRenderedImageBlob,
     validateBlob,
     preferRenderedCaptureForPreview,
+    preferRenderedCaptureForBlobUrl: true,
     allowRenderedCaptureFallbackOnValidationFailure
   });
 
@@ -664,11 +718,11 @@ export async function processPageImageSource({
   validateBlob = loadImageFromBlob,
   fetchBlobFromBackgroundImpl = fetchBlobFromBackground
 }) {
-  if (isGeminiPreviewAssetUrl(sourceUrl)) {
+  if (isGeminiPreviewAssetUrl(sourceUrl) || isBlobPageImageSource(sourceUrl)) {
     return processPreviewPageImageSource({
       sourceUrl,
       imageElement,
-      fetchPreviewBlob,
+      fetchPreviewBlob: isBlobPageImageSource(sourceUrl) ? null : fetchPreviewBlob,
       processWatermarkBlobImpl,
       captureRenderedImageBlob
     });
@@ -816,6 +870,14 @@ function scheduleOnNextFrame(callback) {
     return;
   }
   globalThis.setTimeout(callback, 16);
+}
+
+function scheduleOnIdle(callback) {
+  if (typeof requestIdleCallback === 'function') {
+    requestIdleCallback(() => callback(), { timeout: 120 });
+    return;
+  }
+  globalThis.setTimeout(callback, 32);
 }
 
 function doesRootContain(containerRoot, candidateRoot) {
@@ -1173,6 +1235,7 @@ export function preparePageImageProcessing(imageElement, {
   HTMLImageElementClass = globalThis.HTMLImageElement,
   isProcessableImage = isProcessableGeminiImageElement,
   resolveSourceUrl = resolveCandidateImageUrl,
+  resolveAssetIds = extractGeminiImageAssetIds,
   hideProcessingOverlayImpl = hideProcessingOverlay,
   revokeTrackedObjectUrlImpl = revokeTrackedObjectUrl,
   showProcessingOverlayImpl = showProcessingOverlay
@@ -1192,6 +1255,9 @@ export function preparePageImageProcessing(imageElement, {
   }
 
   const dataset = imageElement.dataset || (imageElement.dataset = {});
+  const assetIds = typeof resolveAssetIds === 'function'
+    ? resolveAssetIds(imageElement)
+    : null;
   const lastSourceUrl = dataset[PAGE_IMAGE_SOURCE_KEY] || '';
   const lastState = dataset[PAGE_IMAGE_STATE_KEY] || '';
   if (lastSourceUrl === sourceUrl && lastState === 'ready') {
@@ -1213,12 +1279,32 @@ export function preparePageImageProcessing(imageElement, {
   dataset.gwrStableSource = sourceUrl;
   dataset[PAGE_IMAGE_SOURCE_KEY] = sourceUrl;
   dataset[PAGE_IMAGE_STATE_KEY] = 'processing';
+  if (assetIds?.responseId) {
+    dataset[PAGE_IMAGE_RESPONSE_ID_KEY] = assetIds.responseId;
+  } else {
+    delete dataset[PAGE_IMAGE_RESPONSE_ID_KEY];
+  }
+  if (assetIds?.draftId) {
+    dataset[PAGE_IMAGE_DRAFT_ID_KEY] = assetIds.draftId;
+  } else {
+    delete dataset[PAGE_IMAGE_DRAFT_ID_KEY];
+  }
+  if (assetIds?.conversationId) {
+    dataset[PAGE_IMAGE_CONVERSATION_ID_KEY] = assetIds.conversationId;
+  } else {
+    delete dataset[PAGE_IMAGE_CONVERSATION_ID_KEY];
+  }
   showProcessingOverlayImpl(imageElement);
 
   return {
     sourceUrl,
     normalizedUrl: normalizeGoogleusercontentImageUrl(sourceUrl),
-    isPreviewSource: isGeminiPreviewAssetUrl(sourceUrl)
+    isPreviewSource: isGeminiPreviewAssetUrl(sourceUrl) || isBlobPageImageSource(sourceUrl),
+    assetIds: {
+      responseId: assetIds?.responseId || null,
+      draftId: assetIds?.draftId || null,
+      conversationId: assetIds?.conversationId || null
+    }
   };
 }
 
@@ -1287,6 +1373,7 @@ export function applyPageImageProcessingResult({
   const selectedStrategy = sourceResult?.selectedStrategy || '';
   const candidateDiagnostics = sourceResult?.candidateDiagnostics || null;
   const candidateDiagnosticsSummary = sourceResult?.candidateDiagnosticsSummary || '';
+  const captureTiming = sourceResult?.captureTiming || null;
 
   applyReadyImageState(imageElement, processedBlob);
 
@@ -1301,6 +1388,7 @@ export function applyPageImageProcessingResult({
       strategy: selectedStrategy || (isPreviewSource ? 'preview-candidate' : 'default'),
       candidateDiagnostics,
       candidateDiagnosticsSummary,
+      captureTiming,
       blobType: processedBlob?.type || '',
       blobSize: processedBlob?.size || 0
     }
@@ -1332,8 +1420,70 @@ export function handlePageImageProcessingFailure({
   applyFailedImageState(imageElement);
 }
 
+function assetIdsMatch(candidate = null, target = null) {
+  if (!candidate || !target) return false;
+
+  if (candidate.draftId && target.draftId) {
+    return candidate.draftId === target.draftId;
+  }
+
+  return Boolean(
+    candidate.responseId
+      && target.responseId
+      && candidate.responseId === target.responseId
+      && candidate.conversationId
+      && target.conversationId
+      && candidate.conversationId === target.conversationId
+  );
+}
+
+function collectBindableImages(root) {
+  const querySelector = getGeminiImageQuerySelector();
+  if (root && typeof root.querySelectorAll === 'function') {
+    return Array.from(root.querySelectorAll(querySelector));
+  }
+  return collectCandidateImages(root);
+}
+
+export function bindOriginalAssetUrlToImages({
+  root = document,
+  assetIds = null,
+  sourceUrl = ''
+} = {}) {
+  const normalizedSourceUrl = typeof sourceUrl === 'string' ? sourceUrl.trim() : '';
+  if (!root || !assetIds || !normalizedSourceUrl) {
+    return 0;
+  }
+
+  let updatedCount = 0;
+  for (const imageElement of collectBindableImages(root)) {
+    const imageAssetIds = {
+      responseId: imageElement?.dataset?.[PAGE_IMAGE_RESPONSE_ID_KEY] || null,
+      draftId: imageElement?.dataset?.[PAGE_IMAGE_DRAFT_ID_KEY] || null,
+      conversationId: imageElement?.dataset?.[PAGE_IMAGE_CONVERSATION_ID_KEY] || null
+    };
+    const resolvedImageAssetIds = imageAssetIds.responseId || imageAssetIds.draftId || imageAssetIds.conversationId
+      ? imageAssetIds
+      : extractGeminiImageAssetIds(imageElement);
+
+    if (!assetIdsMatch(resolvedImageAssetIds, assetIds)) {
+      continue;
+    }
+
+    const dataset = imageElement.dataset || (imageElement.dataset = {});
+    if (dataset.gwrSourceUrl === normalizedSourceUrl) {
+      continue;
+    }
+    dataset.gwrSourceUrl = normalizedSourceUrl;
+    updatedCount += 1;
+  }
+
+  return updatedCount;
+}
+
 export function buildPageImageSourceRequest({
   sourceUrl,
+  assetIds = null,
   imageElement,
   fetchPreviewBlob,
   processWatermarkBlobImpl,
@@ -1341,6 +1491,7 @@ export function buildPageImageSourceRequest({
 } = {}) {
   return {
     sourceUrl,
+    assetIds,
     imageElement,
     fetchPreviewBlob,
     processWatermarkBlobImpl,
@@ -1358,16 +1509,75 @@ export function createPageImageReplacementController({
   fetchPreviewBlob = fetchBlobViaPageBridge,
   processPageImageSourceImpl = processPageImageSource,
   processWatermarkBlobImpl = processWatermarkBlob,
-  removeWatermarkFromBlobImpl = removeWatermarkFromBlob
+  removeWatermarkFromBlobImpl = removeWatermarkFromBlob,
+  scheduleProcessingDrain = scheduleOnIdle,
+  setTimeoutImpl = globalThis.setTimeout?.bind(globalThis) || null,
+  clearTimeoutImpl = globalThis.clearTimeout?.bind(globalThis) || null
 } = {}) {
   const processing = new WeakSet();
+  const queued = new WeakSet();
+  const waitingForRenderable = new WeakMap();
+  const pendingImages = [];
   let observer = null;
+  let drainScheduled = false;
+  let drainActive = false;
+
+  function cleanupRenderableWait(imageElement) {
+    const state = waitingForRenderable.get(imageElement);
+    if (!state) return;
+
+    if (typeof imageElement?.removeEventListener === 'function') {
+      imageElement.removeEventListener('load', state.handleReady);
+      imageElement.removeEventListener('error', state.handleStop);
+    }
+    if (state.timeoutId !== null && typeof clearTimeoutImpl === 'function') {
+      clearTimeoutImpl(state.timeoutId);
+    }
+    waitingForRenderable.delete(imageElement);
+  }
+
+  function deferUntilRenderable(imageElement) {
+    if (!imageElement || waitingForRenderable.has(imageElement)) return;
+
+    const retry = () => {
+      cleanupRenderableWait(imageElement);
+      enqueueImage(imageElement);
+    };
+    const stopWaiting = () => {
+      cleanupRenderableWait(imageElement);
+    };
+    const timeoutId = typeof setTimeoutImpl === 'function'
+      ? setTimeoutImpl(retry, PREVIEW_IMAGE_RENDER_RETRY_MS)
+      : null;
+
+    waitingForRenderable.set(imageElement, {
+      handleReady: retry,
+      handleStop: stopWaiting,
+      timeoutId
+    });
+
+    if (typeof imageElement?.addEventListener === 'function') {
+      imageElement.addEventListener('load', retry, { once: true });
+      imageElement.addEventListener('error', stopWaiting, { once: true });
+    }
+  }
 
   async function processImage(imageElement) {
+    const currentSourceUrl = String(resolveCandidateImageUrl(imageElement) || '').trim();
+    if (
+      currentSourceUrl
+      && isBlobPageImageSource(currentSourceUrl)
+      && !isPreviewImageRenderable(imageElement)
+    ) {
+      deferUntilRenderable(imageElement);
+      return;
+    }
+
+    cleanupRenderableWait(imageElement);
     const context = preparePageImageProcessing(imageElement, { processing });
     if (!context) return;
 
-    const { sourceUrl, normalizedUrl, isPreviewSource } = context;
+    const { sourceUrl, normalizedUrl, isPreviewSource, assetIds } = context;
     emitPageImageProcessingStart({
       logger,
       onLog,
@@ -1379,6 +1589,7 @@ export function createPageImageReplacementController({
     try {
       const sourceResult = await processPageImageSourceImpl(buildPageImageSourceRequest({
         sourceUrl,
+        assetIds,
         imageElement,
         fetchPreviewBlob,
         processWatermarkBlobImpl,
@@ -1408,9 +1619,43 @@ export function createPageImageReplacementController({
     }
   }
 
+  async function drainQueue() {
+    if (drainActive) return;
+    drainActive = true;
+
+    try {
+      const imageElement = pendingImages.shift();
+      if (!imageElement) return;
+      queued.delete(imageElement);
+      await processImage(imageElement);
+    } finally {
+      drainActive = false;
+      if (pendingImages.length > 0) {
+        scheduleDrain();
+      }
+    }
+  }
+
+  function scheduleDrain() {
+    if (drainScheduled || drainActive) return;
+    drainScheduled = true;
+    scheduleProcessingDrain(() => {
+      drainScheduled = false;
+      void drainQueue();
+    });
+  }
+
+  function enqueueImage(imageElement) {
+    if (!imageElement) return;
+    if (queued.has(imageElement) || processing.has(imageElement)) return;
+    queued.add(imageElement);
+    pendingImages.push(imageElement);
+    scheduleDrain();
+  }
+
   function processRoot(root = document) {
     for (const imageElement of collectCandidateImages(root)) {
-      void processImage(imageElement);
+      enqueueImage(imageElement);
     }
   }
   const batchProcessor = createRootBatchProcessor({ processRoot });

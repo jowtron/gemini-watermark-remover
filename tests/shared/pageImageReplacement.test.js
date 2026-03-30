@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   buildPageImageSourceRequest,
+  bindOriginalAssetUrlToImages,
   collectCandidateImages,
   createRootBatchProcessor,
   buildPreviewReplacementCandidates,
@@ -930,6 +931,11 @@ test('preparePageImageProcessing should reset previous processed state and retur
       HTMLImageElementClass: MockHTMLImageElement,
       isProcessableImage: () => true,
       resolveSourceUrl: () => 'https://lh3.googleusercontent.com/gg/example-token=s1024-rj',
+      resolveAssetIds: () => ({
+        responseId: 'r_d7ef418292ede05c',
+        draftId: 'rc_2315ec0b5621fce5',
+        conversationId: 'c_cdec91057e5fdcaf'
+      }),
       hideProcessingOverlayImpl: (target, options) => {
         hiddenImages.push([target, options]);
       },
@@ -945,12 +951,20 @@ test('preparePageImageProcessing should reset previous processed state and retur
     assert.deepEqual(result, {
       sourceUrl: 'https://lh3.googleusercontent.com/gg/example-token=s1024-rj',
       normalizedUrl: 'https://lh3.googleusercontent.com/gg/example-token=s0-rj',
-      isPreviewSource: true
+      isPreviewSource: true,
+      assetIds: {
+        responseId: 'r_d7ef418292ede05c',
+        draftId: 'rc_2315ec0b5621fce5',
+        conversationId: 'c_cdec91057e5fdcaf'
+      }
     });
     assert.equal(processing.has(image), true);
     assert.equal(image.dataset.gwrStableSource, 'https://lh3.googleusercontent.com/gg/example-token=s1024-rj');
     assert.equal(image.dataset.gwrPageImageSource, 'https://lh3.googleusercontent.com/gg/example-token=s1024-rj');
     assert.equal(image.dataset.gwrPageImageState, 'processing');
+    assert.equal(image.dataset.gwrResponseId, 'r_d7ef418292ede05c');
+    assert.equal(image.dataset.gwrDraftId, 'rc_2315ec0b5621fce5');
+    assert.equal(image.dataset.gwrConversationId, 'c_cdec91057e5fdcaf');
     assert.equal(image.dataset.gwrWatermarkObjectUrl, undefined);
     assert.deepEqual(hiddenImages, [[image, { removeImmediately: true }]]);
     assert.deepEqual(revokedUrls, ['blob:mock:old-processed']);
@@ -1053,6 +1067,11 @@ test('buildPageImageSourceRequest should assemble source processing dependencies
 
   const request = buildPageImageSourceRequest({
     sourceUrl: 'https://lh3.googleusercontent.com/gg/example-token=s1024-rj',
+    assetIds: {
+      responseId: 'r_d7ef418292ede05c',
+      draftId: 'rc_2315ec0b5621fce5',
+      conversationId: 'c_cdec91057e5fdcaf'
+    },
     imageElement,
     fetchPreviewBlob,
     processWatermarkBlobImpl,
@@ -1060,6 +1079,11 @@ test('buildPageImageSourceRequest should assemble source processing dependencies
   });
 
   assert.equal(request.sourceUrl, 'https://lh3.googleusercontent.com/gg/example-token=s1024-rj');
+  assert.deepEqual(request.assetIds, {
+    responseId: 'r_d7ef418292ede05c',
+    draftId: 'rc_2315ec0b5621fce5',
+    conversationId: 'c_cdec91057e5fdcaf'
+  });
   assert.equal(request.imageElement, imageElement);
   assert.equal(request.fetchPreviewBlob, fetchPreviewBlob);
   assert.equal(request.processWatermarkBlobImpl, processWatermarkBlobImpl);
@@ -1068,6 +1092,44 @@ test('buildPageImageSourceRequest should assemble source processing dependencies
   assert.equal(typeof request.fetchBlobDirectImpl, 'function');
   assert.equal(typeof request.validateBlob, 'function');
   assert.equal(typeof request.fetchBlobFromBackgroundImpl, 'function');
+});
+
+test('bindOriginalAssetUrlToImages should attach original asset url to matching Gemini image cards', async () => {
+  await withPageImageTestEnv(async ({ MockHTMLImageElement }) => {
+    const matchedImage = new MockHTMLImageElement();
+    matchedImage.dataset = {
+      gwrResponseId: 'r_d7ef418292ede05c',
+      gwrDraftId: 'rc_2315ec0b5621fce5',
+      gwrConversationId: 'c_cdec91057e5fdcaf'
+    };
+
+    const otherImage = new MockHTMLImageElement();
+    otherImage.dataset = {
+      gwrResponseId: 'r_other',
+      gwrDraftId: 'rc_other',
+      gwrConversationId: 'c_cdec91057e5fdcaf'
+    };
+
+    const root = {
+      querySelectorAll() {
+        return [matchedImage, otherImage];
+      }
+    };
+
+    const updatedCount = bindOriginalAssetUrlToImages({
+      root,
+      assetIds: {
+        responseId: 'r_d7ef418292ede05c',
+        draftId: 'rc_2315ec0b5621fce5',
+        conversationId: 'c_cdec91057e5fdcaf'
+      },
+      sourceUrl: 'https://lh3.googleusercontent.com/rd-gg-dl/example=s0'
+    });
+
+    assert.equal(updatedCount, 1);
+    assert.equal(matchedImage.dataset.gwrSourceUrl, 'https://lh3.googleusercontent.com/rd-gg-dl/example=s0');
+    assert.equal(otherImage.dataset.gwrSourceUrl, undefined);
+  });
 });
 
 test('createPageImageReplacementController should apply successful helper result and emit preview events', async () => {
