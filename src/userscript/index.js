@@ -78,6 +78,51 @@ function findGeminiImageElementForAssetIds(root, assetIds) {
   return null;
 }
 
+function collectCandidateImagesFromRoot(root) {
+  if (!root || typeof root !== 'object') {
+    return [];
+  }
+
+  const candidates = [];
+  if (typeof root.tagName === 'string' && root.tagName.toUpperCase() === 'IMG') {
+    candidates.push(root);
+  }
+  if (typeof root.querySelectorAll === 'function') {
+    candidates.push(...root.querySelectorAll('img'));
+  }
+  return candidates.filter(Boolean);
+}
+
+function findPreferredGeminiImageElement(root, assetIds) {
+  const candidates = collectCandidateImagesFromRoot(root);
+  if (candidates.length === 0) {
+    return null;
+  }
+
+  const matchingAssetCandidate = assetIds
+    ? candidates.find((imageElement) => assetIdsMatch(extractGeminiImageAssetIds(imageElement), assetIds))
+    : null;
+  const processedMatchingAssetCandidate = matchingAssetCandidate?.dataset?.gwrWatermarkObjectUrl
+    ? matchingAssetCandidate
+    : null;
+  if (processedMatchingAssetCandidate) {
+    return processedMatchingAssetCandidate;
+  }
+  if (matchingAssetCandidate) {
+    return matchingAssetCandidate;
+  }
+
+  const processedProcessableCandidate = candidates.find((imageElement) => (
+    typeof imageElement?.dataset?.gwrWatermarkObjectUrl === 'string'
+      && imageElement.dataset.gwrWatermarkObjectUrl.trim()
+  ));
+  if (processedProcessableCandidate) {
+    return processedProcessableCandidate;
+  }
+
+  return candidates[0] || null;
+}
+
 function findNearbyGeminiImageElement(targetWindow, target, assetIds) {
   const buttonLike = typeof target?.closest === 'function'
     ? target.closest('button,[role="button"]')
@@ -89,9 +134,7 @@ function findNearbyGeminiImageElement(targetWindow, target, assetIds) {
   ].filter(Boolean);
 
   for (const root of candidateRoots) {
-    const imageElement = typeof root?.querySelector === 'function'
-      ? root.querySelector('img')
-      : null;
+    const imageElement = findPreferredGeminiImageElement(root, assetIds);
     if (imageElement) {
       return imageElement;
     }
@@ -148,6 +191,7 @@ function findNearbyGeminiImageElement(targetWindow, target, assetIds) {
       resolveMetadata: (target) => {
         const assetIds = extractGeminiImageAssetIds(target);
         return {
+          target,
           assetIds,
           imageElement: findNearbyGeminiImageElement(targetWindow, target, assetIds)
         };
@@ -196,7 +240,7 @@ function findNearbyGeminiImageElement(targetWindow, target, assetIds) {
       getIntentMetadata: () => downloadIntentGate.getRecentIntentMetadata(),
       resolveImageElement: (intentMetadata) => findNearbyGeminiImageElement(
         targetWindow,
-        null,
+        intentMetadata?.target || null,
         intentMetadata?.assetIds || null
       ),
       logger: console

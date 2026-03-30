@@ -69,6 +69,17 @@ test('userscript entry should route page image processing through page runtime b
   assert.doesNotMatch(installPageReplacementCall, /bridgeClient\./);
 });
 
+test('userscript entry should preserve the intent target for fullscreen clipboard fallback resolution', () => {
+  const source = loadModuleSource('../../src/userscript/index.js', import.meta.url);
+  const intentGateCall = normalizeWhitespace(getCallSource(source, 'createGeminiDownloadIntentGate'));
+  const clipboardHookCall = normalizeWhitespace(getCallSource(source, 'installGeminiClipboardImageHook'));
+
+  assert.match(intentGateCall, /resolveMetadata:\s*\(target\)\s*=>\s*\{/);
+  assert.match(intentGateCall, /target,/);
+  assert.match(intentGateCall, /imageElement:\s*findNearbyGeminiImageElement\(targetWindow,\s*target,\s*assetIds\)/);
+  assert.match(clipboardHookCall, /resolveImageElement:\s*\(intentMetadata\)\s*=>\s*findNearbyGeminiImageElement\(\s*targetWindow,\s*intentMetadata\?\.target\s*\|\|\s*null,\s*intentMetadata\?\.assetIds\s*\|\|\s*null\s*\)/);
+});
+
 test('userscript entry should install original-asset discovery hooks before async runtime initialization', () => {
   const source = normalizeWhitespace(loadModuleSource('../../src/userscript/index.js', import.meta.url));
 

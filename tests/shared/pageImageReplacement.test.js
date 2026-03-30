@@ -929,6 +929,54 @@ test('processPageImageSource should treat explicitly bound Gemini preview urls a
   ]);
 });
 
+test('processPageImageSource should prefer original-quality processing for Gemini preview urls before preview fallback', async () => {
+  const sourceUrl = 'https://lh3.googleusercontent.com/gg/example-token=s1024-rj';
+  const originalBlob = new Blob(['background'], { type: 'image/jpeg' });
+  const processedBlob = new Blob(['processed'], { type: 'image/png' });
+  const calls = [];
+
+  const result = await processPageImageSource({
+    sourceUrl,
+    imageElement: { dataset: {} },
+    fetchPreviewBlob: async () => {
+      calls.push('preview-fetch');
+      return new Blob(['preview'], { type: 'image/webp' });
+    },
+    fetchBlobFromBackgroundImpl: async (url, fallbackFetchBlob) => {
+      calls.push(['background', url, typeof fallbackFetchBlob]);
+      return originalBlob;
+    },
+    fetchBlobDirectImpl: async () => {
+      calls.push('direct-fetch');
+      throw new Error('direct fetch should not run');
+    },
+    captureRenderedImageBlob: async () => {
+      calls.push('capture');
+      throw new Error('rendered capture should not run');
+    },
+    validateBlob: async (blob) => {
+      calls.push(['validate', blob]);
+      return { width: 1024, height: 1024 };
+    },
+    processWatermarkBlobImpl: async () => {
+      calls.push('preview-process');
+      throw new Error('preview processing should not run when original-quality fetch succeeds');
+    },
+    removeWatermarkFromBlobImpl: async (blob) => {
+      calls.push(['remove', blob]);
+      return processedBlob;
+    }
+  });
+
+  assert.equal(result.skipped, false);
+  assert.equal(result.processedBlob, processedBlob);
+  assert.deepEqual(calls, [
+    ['background', 'https://lh3.googleusercontent.com/gg/example-token=s0-rj', 'function'],
+    ['validate', originalBlob],
+    ['remove', originalBlob]
+  ]);
+});
+
 test('preparePageImageProcessing should skip ready image with unchanged source', async () => {
   await withPageImageTestEnv(async ({ MockHTMLImageElement }) => {
     const image = new MockHTMLImageElement();

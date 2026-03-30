@@ -898,6 +898,25 @@ export async function processPageImageSource({
 }) {
   const treatAsPreviewSource = shouldTreatPageImageSourceAsPreview(imageElement, sourceUrl);
   if (treatAsPreviewSource) {
+    if (!isBlobPageImageSource(sourceUrl) && isGeminiPreviewAssetUrl(sourceUrl)) {
+      try {
+        return await processOriginalPageImageSource({
+          sourceUrl,
+          imageElement,
+          fetchPreviewBlob,
+          removeWatermarkFromBlobImpl,
+          captureRenderedImageBlob,
+          fetchBlobDirectImpl,
+          validateBlob,
+          fetchBlobFromBackgroundImpl,
+          preferRenderedCaptureForPreview: false
+        });
+      } catch {
+        // Fall back to the preview-specific path when the original-quality fetch
+        // is unavailable, invalid, or blocked in the current page context.
+      }
+    }
+
     return processPreviewPageImageSource({
       sourceUrl,
       imageElement,
