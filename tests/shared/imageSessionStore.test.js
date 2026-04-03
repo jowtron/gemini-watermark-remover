@@ -69,12 +69,11 @@ test('createImageSessionStore should keep original, processed, and surface state
 
   const resource = store.getBestResource(sessionKey, 'clipboard');
   assert.deepEqual(resource, {
-    kind: 'processed',
-    url: 'blob:https://gemini.google.com/example-processed',
-    mimeType: 'image/png',
+    kind: 'original',
+    url: 'https://lh3.googleusercontent.com/rd-gg/example=s0-rp',
+    mimeType: '',
     processedMeta: null,
-    source: 'page-fetch',
-    slot: 'preview'
+    source: 'original'
   });
 });
 
@@ -113,11 +112,11 @@ test('createImageSessionStore should keep preview and full processed resources i
 
   assert.deepEqual(store.getBestResource(sessionKey, 'clipboard'), {
     kind: 'processed',
-    url: 'blob:https://gemini.google.com/slots-preview',
+    url: 'blob:https://gemini.google.com/slots-full',
     mimeType: 'image/png',
     processedMeta: null,
-    source: 'preview-candidate',
-    slot: 'preview'
+    source: 'original-download',
+    slot: 'full'
   });
 
   assert.deepEqual(store.getBestResource(sessionKey, 'download'), {
@@ -152,6 +151,41 @@ test('createImageSessionStore should keep the raw processed blob on a slot resou
   const resource = store.getBestResource(sessionKey, 'download');
   assert.equal(resource?.blob, fullBlob);
   assert.equal(resource?.slot, 'full');
+});
+
+test('createImageSessionStore should not treat preview-only processed resources as valid clipboard or download output', () => {
+  const store = createImageSessionStore({
+    now: () => 123456
+  });
+  const sessionKey = store.getOrCreateByAssetIds({
+    responseId: 'r_preview_only_example',
+    draftId: 'rc_preview_only_example',
+    conversationId: 'c_preview_only_example'
+  });
+
+  store.updateOriginalSource(sessionKey, 'https://lh3.googleusercontent.com/rd-gg/preview-only=s0-rp');
+  store.updateProcessedResult(sessionKey, {
+    slot: 'preview',
+    objectUrl: 'blob:https://gemini.google.com/preview-only',
+    blobType: 'image/png',
+    processedFrom: 'preview-candidate'
+  });
+
+  assert.deepEqual(store.getBestResource(sessionKey, 'clipboard'), {
+    kind: 'original',
+    url: 'https://lh3.googleusercontent.com/rd-gg/preview-only=s0-rp',
+    mimeType: '',
+    processedMeta: null,
+    source: 'original'
+  });
+
+  assert.deepEqual(store.getBestResource(sessionKey, 'download'), {
+    kind: 'original',
+    url: 'https://lh3.googleusercontent.com/rd-gg/preview-only=s0-rp',
+    mimeType: '',
+    processedMeta: null,
+    source: 'original'
+  });
 });
 
 test('createImageSessionStore should prefer a processed preview element for clipboard-style actions', () => {

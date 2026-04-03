@@ -131,7 +131,7 @@ test('createGeminiDownloadFetchHook should bypass non-image Gemini responses', a
   assert.equal(await response.text(), 'https://lh3.google.com/rd-gg/token=s0-d-I?alr=yes');
 });
 
-test('createGeminiDownloadFetchHook should fall back to original response when processing fails', async () => {
+test('createGeminiDownloadFetchHook should reject the request when processing fails', async () => {
   const originalFetch = async () => new Response(new Blob(['original'], { type: 'image/png' }), {
     status: 200,
     headers: { 'content-type': 'image/png' }
@@ -147,9 +147,53 @@ test('createGeminiDownloadFetchHook should fall back to original response when p
     }
   });
 
+  await assert.rejects(
+    hook('https://lh3.googleusercontent.com/rd-gg/token=s1024'),
+    /boom/
+  );
+});
+
+test('createGeminiDownloadFetchHook should notify when a processed full-quality blob is produced', async () => {
+  const originalFetch = async () => new Response(new Blob(['original'], { type: 'image/png' }), {
+    status: 200,
+    headers: { 'content-type': 'image/png' }
+  });
+
+  let seenPayload = null;
+  const hook = createGeminiDownloadFetchHook({
+    originalFetch,
+    isTargetUrl: () => true,
+    normalizeUrl: () => 'https://lh3.googleusercontent.com/rd-gg/token=s0',
+    provideActionContext: () => ({
+      action: 'clipboard',
+      sessionKey: 'draft:rc_clipboard_full',
+      assetIds: {
+        draftId: 'rc_clipboard_full'
+      }
+    }),
+    onProcessedBlobResolved: async (payload) => {
+      seenPayload = {
+        ...payload,
+        processedText: await payload.processedBlob.text()
+      };
+    },
+    processBlob: async () => new Blob(['processed'], { type: 'image/png' })
+  });
+
   const response = await hook('https://lh3.googleusercontent.com/rd-gg/token=s1024');
 
-  assert.equal(await response.text(), 'original');
+  assert.equal(await response.text(), 'processed');
+  assert.deepEqual(seenPayload && {
+    action: seenPayload.actionContext?.action,
+    sessionKey: seenPayload.actionContext?.sessionKey,
+    normalizedUrl: seenPayload.normalizedUrl,
+    processedText: seenPayload.processedText
+  }, {
+    action: 'clipboard',
+    sessionKey: 'draft:rc_clipboard_full',
+    normalizedUrl: 'https://lh3.googleusercontent.com/rd-gg/token=s0',
+    processedText: 'processed'
+  });
 });
 
 test('createGeminiDownloadFetchHook should reprocess repeated normalized url requests after the in-flight cache settles', async () => {

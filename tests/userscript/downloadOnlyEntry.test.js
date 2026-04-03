@@ -8,7 +8,7 @@ import {
   normalizeWhitespace
 } from '../testUtils/moduleStructure.js';
 
-test('userscript entry should install download hook and page image replacement without default active click interception', () => {
+test('userscript entry should install download hooks while keeping preview replacement disabled by default', () => {
   const source = loadModuleSource('../../src/userscript/index.js', import.meta.url);
 
   assert.equal(hasImportedBinding(source, './downloadHook.js', 'installGeminiDownloadHook'), true);
@@ -23,6 +23,11 @@ test('userscript entry should install download hook and page image replacement w
    assert.equal(hasImportedBinding(source, './pageProcessBridge.js', 'createPageProcessBridgeClient'), true);
    assert.equal(hasImportedBinding(source, './pageProcessorRuntime.js', 'installInjectedPageProcessorRuntime'), true);
   assert.equal(hasImportedBinding(source, './downloadClick.js', 'installGeminiDownloadClickHandler'), false);
+  assert.match(normalizeWhitespace(source), /function isPreviewReplacementEnabled\(targetWindow\)/);
+  assert.match(
+    normalizeWhitespace(source),
+    /const pageImageReplacementController = isPreviewReplacementEnabled\(targetWindow\)\s*\?\s*installPageImageReplacement\(/
+  );
 });
 
 test('userscript entry should skip initialization inside nested frames', () => {

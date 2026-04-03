@@ -111,6 +111,61 @@ test('installGeminiClipboardImageHook should fall back to the original clipboard
   dispose();
 });
 
+test('installGeminiClipboardImageHook should reject Gemini copy actions when only preview-or-original resources are available', async () => {
+  const writtenItems = [];
+  const originalItem = new MockClipboardItem({
+    'image/jpeg': new Blob(['original'], { type: 'image/jpeg' })
+  });
+  const imageSessionStore = createImageSessionStore({
+    now: () => 123456
+  });
+  const sessionKey = imageSessionStore.getOrCreateByAssetIds({
+    responseId: 'r_clipboard_missing_full',
+    draftId: 'rc_clipboard_missing_full',
+    conversationId: 'c_clipboard_missing_full'
+  });
+  imageSessionStore.updateOriginalSource(sessionKey, 'https://lh3.googleusercontent.com/rd-gg/clipboard-missing-full=s0-rp');
+  imageSessionStore.updateProcessedResult(sessionKey, {
+    slot: 'preview',
+    objectUrl: 'blob:https://gemini.google.com/clipboard-preview-only',
+    blobType: 'image/png',
+    processedFrom: 'preview-candidate'
+  });
+
+  const clipboard = {
+    async write(items) {
+      writtenItems.push(items);
+    }
+  };
+  const targetWindow = {
+    navigator: { clipboard },
+    ClipboardItem: MockClipboardItem
+  };
+
+  const dispose = installGeminiClipboardImageHook(targetWindow, {
+    imageSessionStore,
+    getActionContext: () => ({
+      action: 'clipboard',
+      sessionKey,
+      assetIds: {
+        draftId: 'rc_clipboard_missing_full'
+      }
+    }),
+    fetchBlobDirect: async () => {
+      throw new Error('Gemini clipboard actions should not fetch preview-or-original fallback data');
+    },
+    logger: { warn() {} }
+  });
+
+  await assert.rejects(
+    clipboard.write([originalItem]),
+    /Original image is unavailable for clipboard processing/
+  );
+  assert.equal(writtenItems.length, 0);
+
+  dispose();
+});
+
 test('installGeminiClipboardImageHook should resolve blob object urls through image decoding instead of fetch', async () => {
   const writtenItems = [];
   const processedBlob = new Blob(['processed-from-image'], { type: 'image/png' });
@@ -223,7 +278,7 @@ test('installGeminiClipboardImageHook should resolve the processed blob from the
   dispose();
 });
 
-test('installGeminiClipboardImageHook should reuse an existing preview processed session blob without decoding object urls', async () => {
+test('installGeminiClipboardImageHook should reuse an existing full processed session blob without decoding object urls', async () => {
   const writtenItems = [];
   const processedBlob = new Blob(['processed-from-session-blob'], { type: 'image/png' });
   const imageSessionStore = createImageSessionStore({
@@ -235,11 +290,11 @@ test('installGeminiClipboardImageHook should reuse an existing preview processed
     conversationId: 'c_clipboard_blob'
   });
   imageSessionStore.updateProcessedResult(sessionKey, {
-    slot: 'preview',
-    objectUrl: 'blob:https://gemini.google.com/session-preview-blob',
+    slot: 'full',
+    objectUrl: 'blob:https://gemini.google.com/session-full-blob',
     blob: processedBlob,
     blobType: 'image/png',
-    processedFrom: 'preview-candidate'
+    processedFrom: 'original-download'
   });
 
   const clipboard = {
@@ -294,11 +349,11 @@ test('installGeminiClipboardImageHook should use getActionContext when provided'
     conversationId: 'c_clipboard_action_context'
   });
   imageSessionStore.updateProcessedResult(sessionKey, {
-    slot: 'preview',
-    objectUrl: 'blob:https://gemini.google.com/session-preview-action-context',
+    slot: 'full',
+    objectUrl: 'blob:https://gemini.google.com/session-full-action-context',
     blob: processedBlob,
     blobType: 'image/png',
-    processedFrom: 'preview-candidate'
+    processedFrom: 'original-download'
   });
 
   const clipboard = {
@@ -353,11 +408,11 @@ test('installGeminiClipboardImageHook should prefer provideActionContext over ge
     conversationId: 'c_clipboard_provided_action_context'
   });
   imageSessionStore.updateProcessedResult(sessionKey, {
-    slot: 'preview',
-    objectUrl: 'blob:https://gemini.google.com/session-preview-provided-action-context',
+    slot: 'full',
+    objectUrl: 'blob:https://gemini.google.com/session-full-provided-action-context',
     blob: processedBlob,
     blobType: 'image/png',
-    processedFrom: 'preview-candidate'
+    processedFrom: 'original-download'
   });
 
   const clipboard = {
