@@ -9,6 +9,7 @@ import {
     fitConstrainedPreviewAlphaModel,
     fitPreviewOnlyRenderModel,
     fitPreviewRenderModel,
+    measurePreviewBoundaryMetrics,
     restorePreviewRegionWithNeighborhoodPrior,
     restorePreviewRegionWithRenderModel,
     renderPreviewWatermarkObservation
@@ -29,6 +30,51 @@ function createPosition(size) {
         width: size,
         height: size
     };
+}
+
+function createSolidImageData(width, height, rgb) {
+    const imageData = {
+        width,
+        height,
+        data: new Uint8ClampedArray(width * height * 4)
+    };
+
+    for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+            const idx = (y * width + x) * 4;
+            imageData.data[idx] = rgb[0];
+            imageData.data[idx + 1] = rgb[1];
+            imageData.data[idx + 2] = rgb[2];
+            imageData.data[idx + 3] = 255;
+        }
+    }
+
+    return imageData;
+}
+
+function paintRoi(imageData, position, rgb) {
+    for (let row = 0; row < position.height; row++) {
+        for (let col = 0; col < position.width; col++) {
+            const idx = ((position.y + row) * imageData.width + (position.x + col)) * 4;
+            imageData.data[idx] = rgb[0];
+            imageData.data[idx + 1] = rgb[1];
+            imageData.data[idx + 2] = rgb[2];
+        }
+    }
+}
+
+function paintRoiBoundary(imageData, position, rgb) {
+    for (let row = 0; row < position.height; row++) {
+        for (let col = 0; col < position.width; col++) {
+            const isBoundary = row === 0 || col === 0 || row === position.height - 1 || col === position.width - 1;
+            if (!isBoundary) continue;
+
+            const idx = ((position.y + row) * imageData.width + (position.x + col)) * 4;
+            imageData.data[idx] = rgb[0];
+            imageData.data[idx + 1] = rgb[1];
+            imageData.data[idx + 2] = rgb[2];
+        }
+    }
 }
 
 function computeMeanAbsoluteError(left, right) {
@@ -65,6 +111,16 @@ function applyBlurIndependent(alphaMap, size, radius) {
         current = next;
     }
     return current;
+}
+
+function mulberry32(seed) {
+    let state = seed >>> 0;
+    return () => {
+        let t = state += 0x6D2B79F5;
+        t = Math.imul(t ^ (t >>> 15), t | 1);
+        t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
 }
 
 function clampChannelIndependent(value) {
@@ -310,6 +366,35 @@ test('blurAlphaMap should preserve bounds while softening the peak alpha', () =>
     assert.equal([...blurred].every((value) => value >= 0 && value <= 1), true);
     assert.ok(blurred[4] < 1, `center=${blurred[4]}`);
     assert.ok(blurred[1] > 0, `edge=${blurred[1]}`);
+});
+
+test('measurePreviewBoundaryMetrics should normalize boundary continuity against preview boundary scale', () => {
+    const position = {
+        x: 2,
+        y: 2,
+        width: 4,
+        height: 4
+    };
+    const lowPreview = createSolidImageData(8, 8, [100, 110, 120]);
+    const highPreview = createSolidImageData(8, 8, [100, 110, 120]);
+    const lowCandidate = createSolidImageData(8, 8, [100, 110, 120]);
+    const highCandidate = createSolidImageData(8, 8, [100, 110, 120]);
+
+    paintRoi(lowPreview, position, [140, 150, 160]);
+    paintRoi(highPreview, position, [180, 190, 200]);
+    paintRoi(lowCandidate, position, [140, 150, 160]);
+    paintRoi(highCandidate, position, [180, 190, 200]);
+    paintRoiBoundary(lowCandidate, position, [120, 130, 140]);
+    paintRoiBoundary(highCandidate, position, [140, 150, 160]);
+
+    const lowMetrics = measurePreviewBoundaryMetrics(lowCandidate, lowPreview, position);
+    const highMetrics = measurePreviewBoundaryMetrics(highCandidate, highPreview, position);
+
+    assert.ok(highMetrics.rawScore > lowMetrics.rawScore * 1.8, `lowRaw=${lowMetrics.rawScore}, highRaw=${highMetrics.rawScore}`);
+    assert.ok(
+        Math.abs(highMetrics.normalizedScore - lowMetrics.normalizedScore) < 0.02,
+        `lowNormalized=${lowMetrics.normalizedScore}, highNormalized=${highMetrics.normalizedScore}`
+    );
 });
 
 test('fitConstrainedPreviewAlphaModel should beat the unwarped standard alpha on a warped blurred preview sample', () => {
@@ -604,4 +689,275 @@ test('fitPreviewOnlyRenderModel should beat direct inverse alpha removal using o
 
     assert.ok(restoredDelta < naiveDelta * 0.85, `naiveDelta=${naiveDelta}, restoredDelta=${restoredDelta}`);
     assert.deepEqual({ dx: fitted.params.shift.dx, dy: fitted.params.shift.dy }, { dx: 0.5, dy: -0.5 });
+});
+
+test('fitPreviewOnlyRenderModel should search blend strength against the final restored output, not only the prior forward render', () => {
+    const size = 16;
+    const sourceImageData = createPatternImageData(72, 72);
+    const position = createPosition(size);
+
+    for (let row = -8; row < position.height + 8; row++) {
+        for (let col = -8; col < position.width + 8; col++) {
+            const x = position.x + col;
+            const y = position.y + row;
+            if (x < 0 || y < 0 || x >= sourceImageData.width || y >= sourceImageData.height) continue;
+            const idx = (y * sourceImageData.width + x) * 4;
+            const value = 118 + Math.round(0.18 * ((x - 24) ** 2 - (y - 28) ** 2));
+            sourceImageData.data[idx] = clampChannelIndependent(value);
+            sourceImageData.data[idx + 1] = clampChannelIndependent(value + 12);
+            sourceImageData.data[idx + 2] = clampChannelIndependent(value + 24);
+        }
+    }
+
+    const standardAlpha = createSyntheticAlphaMap(size);
+    const previewAlpha = applyBlurIndependent(
+        warpAlphaMap(standardAlpha, size, { dx: 0.5, dy: -0.5, scale: 0.99 }),
+        size,
+        1
+    );
+    const previewImageData = applySyntheticPreviewObservation(sourceImageData, previewAlpha, position, {
+        alphaGain: 1,
+        compositeBlurRadius: 1
+    });
+
+    const baseline = fitPreviewOnlyRenderModel({
+        previewImageData,
+        standardAlphaMap: standardAlpha,
+        position,
+        shiftCandidates: [-0.5, 0, 0.5],
+        scaleCandidates: [0.99, 1],
+        alphaBlurRadii: [0, 1],
+        compositeBlurRadii: [0, 1],
+        alphaGainCandidates: [1],
+        blendStrengthCandidates: [0.85],
+        priorRadius: 6
+    });
+    const baselineRestored = restorePreviewRegionWithNeighborhoodPrior({
+        previewImageData,
+        alphaMap: baseline.alphaMap,
+        position,
+        alphaGain: baseline.alphaGain,
+        priorImageData: baseline.priorImageData,
+        blendStrength: baseline.params.blendStrength
+    });
+    const baselineDelta = measureRegionAbsDelta(baselineRestored, sourceImageData, position);
+
+    const fitted = fitPreviewOnlyRenderModel({
+        previewImageData,
+        standardAlphaMap: standardAlpha,
+        position,
+        shiftCandidates: [-0.5, 0, 0.5],
+        scaleCandidates: [0.99, 1],
+        alphaBlurRadii: [0, 1],
+        compositeBlurRadii: [0, 1],
+        alphaGainCandidates: [1],
+        blendStrengthCandidates: [0.55, 0.7, 0.85, 1],
+        priorRadius: 6
+    });
+    const restored = restorePreviewRegionWithNeighborhoodPrior({
+        previewImageData,
+        alphaMap: fitted.alphaMap,
+        position,
+        alphaGain: fitted.alphaGain,
+        priorImageData: fitted.priorImageData,
+        blendStrength: fitted.params.blendStrength
+    });
+    const restoredDelta = measureRegionAbsDelta(restored, sourceImageData, position);
+
+    assert.equal(fitted.params.blendStrength, 1);
+    assert.ok(restoredDelta < baselineDelta * 0.85, `baselineDelta=${baselineDelta}, restoredDelta=${restoredDelta}`);
+});
+
+test('fitPreviewOnlyRenderModel should search prior radius when preview-only prior scale materially changes recovery quality', () => {
+    const size = 16;
+    const sourceImageData = createPatternImageData(72, 72);
+    const position = createPosition(size);
+
+    for (let row = -12; row < position.height + 12; row++) {
+        for (let col = -12; col < position.width + 12; col++) {
+            const x = position.x + col;
+            const y = position.y + row;
+            if (x < 0 || y < 0 || x >= sourceImageData.width || y >= sourceImageData.height) continue;
+            const idx = (y * sourceImageData.width + x) * 4;
+            const value = 120 + Math.round(
+                18 * Math.sin(col / 2) * Math.exp(-(Math.abs(row) + Math.abs(col)) / 10)
+            );
+            sourceImageData.data[idx] = clampChannelIndependent(value);
+            sourceImageData.data[idx + 1] = clampChannelIndependent(value + 10);
+            sourceImageData.data[idx + 2] = clampChannelIndependent(value + 20);
+        }
+    }
+
+    const standardAlpha = createSyntheticAlphaMap(size);
+    const previewAlpha = warpAlphaMap(standardAlpha, size, { dx: 0.5, dy: 0.5, scale: 0.99 });
+    const previewImageData = applySyntheticPreviewObservation(sourceImageData, previewAlpha, position, {
+        alphaGain: 1,
+        compositeBlurRadius: 0
+    });
+
+    const baseline = fitPreviewOnlyRenderModel({
+        previewImageData,
+        standardAlphaMap: standardAlpha,
+        position,
+        shiftCandidates: [-0.5, 0, 0.5],
+        scaleCandidates: [0.99, 1],
+        alphaBlurRadii: [0, 1],
+        compositeBlurRadii: [0],
+        alphaGainCandidates: [1],
+        blendStrengthCandidates: [1],
+        boundaryContinuityWeight: 5,
+        priorRadius: 6
+    });
+    const baselineRestored = restorePreviewRegionWithNeighborhoodPrior({
+        previewImageData,
+        alphaMap: baseline.alphaMap,
+        position,
+        alphaGain: baseline.alphaGain,
+        priorImageData: baseline.priorImageData,
+        blendStrength: baseline.params.blendStrength
+    });
+    const baselineDelta = measureRegionAbsDelta(baselineRestored, sourceImageData, position);
+
+    const fitted = fitPreviewOnlyRenderModel({
+        previewImageData,
+        standardAlphaMap: standardAlpha,
+        position,
+        shiftCandidates: [-0.5, 0, 0.5],
+        scaleCandidates: [0.99, 1],
+        alphaBlurRadii: [0, 1],
+        compositeBlurRadii: [0],
+        alphaGainCandidates: [1],
+        blendStrengthCandidates: [1],
+        boundaryContinuityWeight: 5,
+        priorRadiusCandidates: [2, 6, 8, 10],
+        priorRadius: 6
+    });
+    const restored = restorePreviewRegionWithNeighborhoodPrior({
+        previewImageData,
+        alphaMap: fitted.alphaMap,
+        position,
+        alphaGain: fitted.alphaGain,
+        priorImageData: fitted.priorImageData,
+        blendStrength: fitted.params.blendStrength
+    });
+    const restoredDelta = measureRegionAbsDelta(restored, sourceImageData, position);
+
+    assert.equal(fitted.params.priorRadius, 8);
+    assert.ok(restoredDelta < baselineDelta * 0.95, `baselineDelta=${baselineDelta}, restoredDelta=${restoredDelta}`);
+});
+
+test('fitPreviewOnlyRenderModel should compare final scored candidates across prior radii instead of keeping the globally best forward-only prior', () => {
+    const size = 16;
+    const position = createPosition(size);
+    const sourceImageData = createPatternImageData(72, 72);
+    const rand = mulberry32(6);
+
+    const ax = 2 + rand() * 8;
+    const ay = 2 + rand() * 8;
+    const bx = 2 + rand() * 8;
+    const by = 2 + rand() * 8;
+    const amp1 = 10 + rand() * 30;
+    const amp2 = 10 + rand() * 30;
+    const slopeX = (rand() - 0.5) * 2;
+    const slopeY = (rand() - 0.5) * 2;
+
+    for (let row = -12; row < position.height + 12; row++) {
+        for (let col = -12; col < position.width + 12; col++) {
+            const x = position.x + col;
+            const y = position.y + row;
+            if (x < 0 || y < 0 || x >= sourceImageData.width || y >= sourceImageData.height) continue;
+
+            const idx = (y * sourceImageData.width + x) * 4;
+            const value = 120 + Math.round(
+                amp1 * Math.sin(col / ax + row / ay) +
+                amp2 * Math.cos(col / bx - row / by) +
+                slopeX * col +
+                slopeY * row
+            );
+            sourceImageData.data[idx] = clampChannelIndependent(value);
+            sourceImageData.data[idx + 1] = clampChannelIndependent(value + 10);
+            sourceImageData.data[idx + 2] = clampChannelIndependent(value + 20);
+        }
+    }
+
+    const standardAlpha = createSyntheticAlphaMap(size);
+    const previewImageData = applySyntheticPreviewObservation(
+        sourceImageData,
+        warpAlphaMap(standardAlpha, size, { dx: 0.5, dy: 0.5, scale: 0.99 }),
+        position,
+        { alphaGain: 1, compositeBlurRadius: 0 }
+    );
+
+    const radius2 = fitPreviewOnlyRenderModel({
+        previewImageData,
+        standardAlphaMap: standardAlpha,
+        position,
+        shiftCandidates: [-0.5, 0, 0.5],
+        scaleCandidates: [0.99, 1],
+        alphaBlurRadii: [0, 1],
+        compositeBlurRadii: [0],
+        alphaGainCandidates: [1],
+        blendStrengthCandidates: [1],
+        boundaryContinuityWeight: 5,
+        priorRadiusCandidates: [2]
+    });
+    const radius2Restored = restorePreviewRegionWithNeighborhoodPrior({
+        previewImageData,
+        alphaMap: radius2.alphaMap,
+        position,
+        alphaGain: radius2.alphaGain,
+        priorImageData: radius2.priorImageData,
+        blendStrength: radius2.params.blendStrength
+    });
+    const radius2Delta = measureRegionAbsDelta(radius2Restored, sourceImageData, position);
+
+    const radius4 = fitPreviewOnlyRenderModel({
+        previewImageData,
+        standardAlphaMap: standardAlpha,
+        position,
+        shiftCandidates: [-0.5, 0, 0.5],
+        scaleCandidates: [0.99, 1],
+        alphaBlurRadii: [0, 1],
+        compositeBlurRadii: [0],
+        alphaGainCandidates: [1],
+        blendStrengthCandidates: [1],
+        boundaryContinuityWeight: 5,
+        priorRadiusCandidates: [4]
+    });
+    const radius4Restored = restorePreviewRegionWithNeighborhoodPrior({
+        previewImageData,
+        alphaMap: radius4.alphaMap,
+        position,
+        alphaGain: radius4.alphaGain,
+        priorImageData: radius4.priorImageData,
+        blendStrength: radius4.params.blendStrength
+    });
+    const radius4Delta = measureRegionAbsDelta(radius4Restored, sourceImageData, position);
+
+    const fitted = fitPreviewOnlyRenderModel({
+        previewImageData,
+        standardAlphaMap: standardAlpha,
+        position,
+        shiftCandidates: [-0.5, 0, 0.5],
+        scaleCandidates: [0.99, 1],
+        alphaBlurRadii: [0, 1],
+        compositeBlurRadii: [0],
+        alphaGainCandidates: [1],
+        blendStrengthCandidates: [1],
+        boundaryContinuityWeight: 5,
+        priorRadiusCandidates: [2, 4]
+    });
+    const restored = restorePreviewRegionWithNeighborhoodPrior({
+        previewImageData,
+        alphaMap: fitted.alphaMap,
+        position,
+        alphaGain: fitted.alphaGain,
+        priorImageData: fitted.priorImageData,
+        blendStrength: fitted.params.blendStrength
+    });
+    const restoredDelta = measureRegionAbsDelta(restored, sourceImageData, position);
+
+    assert.ok(radius4Delta < radius2Delta, `radius2Delta=${radius2Delta}, radius4Delta=${radius4Delta}`);
+    assert.equal(fitted.params.priorRadius, 4);
+    assert.ok(restoredDelta <= radius4Delta, `radius4Delta=${radius4Delta}, restoredDelta=${restoredDelta}`);
 });

@@ -1134,3 +1134,71 @@ test('16-9.webp metadata should report only the passes that were actually applie
         await browser.close();
     }
 });
+
+test('16-9.webp should not ship a hard-rejected standard candidate when a safer nearby size exists', async (t) => {
+    let browser;
+    try {
+        browser = await chromium.launch({ headless: true });
+    } catch (error) {
+        if (isMissingPlaywrightExecutableError(error)) {
+            t.skip('Playwright browser binaries are missing in this environment');
+            return;
+        }
+        throw error;
+    }
+
+    const page = await browser.newPage();
+
+    try {
+        const alpha48 = calculateAlphaMap(await decodeImageDataInPage(page, BG48_PATH));
+        const alpha96 = calculateAlphaMap(await decodeImageDataInPage(page, BG96_PATH));
+        const filePath = path.join(SAMPLE_DIR, '16-9.webp');
+        const imageData = await decodeImageDataInPage(page, filePath);
+        const processed = processWatermarkImageData(imageData, {
+            alpha48,
+            alpha96,
+            maxPasses: 4,
+            getAlphaMap: (size) => size === 48 ? alpha48 : size === 96 ? alpha96 : interpolateAlphaMap(alpha96, 96, size)
+        });
+
+        assert.equal(processed.meta.applied, true, 'expected 16-9.webp to enter removal pipeline');
+        assert.equal(
+            processed.meta.selectionDebug?.hardReject,
+            false,
+            `expected 16-9.webp final candidate to avoid hard-reject fallback, selectionDebug=${JSON.stringify(processed.meta.selectionDebug)}`
+        );
+    } finally {
+        await browser.close();
+    }
+});
+
+test('16-9.webp should keep canonical outline gradient from rising after standard refinement', async (t) => {
+    let browser;
+    try {
+        browser = await chromium.launch({ headless: true });
+    } catch (error) {
+        if (isMissingPlaywrightExecutableError(error)) {
+            t.skip('Playwright browser binaries are missing in this environment');
+            return;
+        }
+        throw error;
+    }
+
+    const page = await browser.newPage();
+
+    try {
+        const alpha48 = calculateAlphaMap(await decodeImageDataInPage(page, BG48_PATH));
+        const alpha96 = calculateAlphaMap(await decodeImageDataInPage(page, BG96_PATH));
+        const filePath = path.join(SAMPLE_DIR, '16-9.webp');
+        const imageData = await decodeImageDataInPage(page, filePath);
+        const result = removeWatermarkLikeEngine(imageData, alpha48, alpha96);
+
+        assert.ok(!result.skipped, 'expected 16-9.webp to be processed');
+        assert.ok(
+            result.afterGradient <= result.beforeGradient,
+            `expected canonical outline gradient to not increase, before=${result.beforeGradient}, after=${result.afterGradient}`
+        );
+    } finally {
+        await browser.close();
+    }
+});

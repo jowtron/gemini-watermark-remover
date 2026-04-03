@@ -6,6 +6,7 @@ import {
 const NEAR_BLACK_THRESHOLD = 5;
 const TEXTURE_REFERENCE_MARGIN = 1;
 const TEXTURE_STD_FLOOR_RATIO = 0.8;
+const TEXTURE_DARKNESS_VISIBILITY_HARD_REJECT_THRESHOLD = 1.5;
 const DEFAULT_HALO_MIN_ALPHA = 0.12;
 const DEFAULT_HALO_MAX_ALPHA = 0.35;
 const DEFAULT_HALO_OUTSIDE_ALPHA_MAX = 0.01;
@@ -197,18 +198,25 @@ export function assessReferenceTextureAlignmentFromStats({
         ? Math.max(0, referenceTextureStats.stdLum * TEXTURE_STD_FLOOR_RATIO - candidateTextureStats.stdLum) /
             Math.max(1, referenceTextureStats.stdLum)
         : 0;
+    const darknessVisibility = referenceTextureStats && candidateTextureStats
+        ? Math.max(0, referenceTextureStats.meanLum - candidateTextureStats.meanLum - TEXTURE_REFERENCE_MARGIN) /
+            Math.max(1, referenceTextureStats.stdLum)
+        : 0;
     const tooDark = darknessPenalty > 0;
     const tooFlat = flatnessPenalty > 0;
+    const visibleDarkHole = tooDark && darknessVisibility >= TEXTURE_DARKNESS_VISIBILITY_HARD_REJECT_THRESHOLD;
 
     return {
         referenceTextureStats,
         candidateTextureStats,
         darknessPenalty,
         flatnessPenalty,
+        darknessVisibility,
         texturePenalty: darknessPenalty * 2 + flatnessPenalty * 2,
         tooDark,
         tooFlat,
-        hardReject: tooDark && tooFlat
+        visibleDarkHole,
+        hardReject: (tooDark && tooFlat) || visibleDarkHole
     };
 }
 

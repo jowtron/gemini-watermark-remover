@@ -246,6 +246,132 @@ function measureRegionAbsDelta(candidateImageData, targetImageData, position) {
     return count > 0 ? total / count : 0;
 }
 
+function averageSampleColor(imageData, samples) {
+    let sumR = 0;
+    let sumG = 0;
+    let sumB = 0;
+    let count = 0;
+
+    for (const [x, y] of samples) {
+        if (x < 0 || y < 0 || x >= imageData.width || y >= imageData.height) {
+            continue;
+        }
+        const idx = (y * imageData.width + x) * 4;
+        sumR += imageData.data[idx];
+        sumG += imageData.data[idx + 1];
+        sumB += imageData.data[idx + 2];
+        count++;
+    }
+
+    if (count <= 0) {
+        return [0, 0, 0];
+    }
+
+    return [sumR / count, sumG / count, sumB / count];
+}
+
+export function measurePreviewBoundaryMetrics(candidateImageData, previewImageData, position) {
+    let rawTotal = 0;
+    let previewBoundaryTotal = 0;
+    let localContrastTotal = 0;
+    let count = 0;
+
+    const compareBoundaryPixel = (x, y, insideSamples, outsideSamples) => {
+        const idx = (y * candidateImageData.width + x) * 4;
+        const previewIdx = (y * previewImageData.width + x) * 4;
+        const inside = averageSampleColor(previewImageData, insideSamples);
+        const outside = averageSampleColor(previewImageData, outsideSamples);
+
+        for (let channel = 0; channel < 3; channel++) {
+            rawTotal += Math.abs(candidateImageData.data[idx + channel] - outside[channel]);
+            previewBoundaryTotal += Math.abs(previewImageData.data[previewIdx + channel] - outside[channel]);
+            localContrastTotal += Math.abs(inside[channel] - outside[channel]);
+            count++;
+        }
+    };
+
+    for (let col = 0; col < position.width; col++) {
+        const x = position.x + col;
+        compareBoundaryPixel(
+            x,
+            position.y,
+            [
+                [x - 1, position.y],
+                [x, position.y],
+                [x + 1, position.y]
+            ],
+            [
+                [x - 1, position.y - 1],
+                [x, position.y - 1],
+                [x + 1, position.y - 1]
+            ]
+        );
+        compareBoundaryPixel(
+            x,
+            position.y + position.height - 1,
+            [
+                [x - 1, position.y + position.height - 1],
+                [x, position.y + position.height - 1],
+                [x + 1, position.y + position.height - 1]
+            ],
+            [
+                [x - 1, position.y + position.height],
+                [x, position.y + position.height],
+                [x + 1, position.y + position.height]
+            ]
+        );
+    }
+
+    for (let row = 1; row < position.height - 1; row++) {
+        const y = position.y + row;
+        compareBoundaryPixel(
+            position.x,
+            y,
+            [
+                [position.x, y - 1],
+                [position.x, y],
+                [position.x, y + 1]
+            ],
+            [
+                [position.x - 1, y - 1],
+                [position.x - 1, y],
+                [position.x - 1, y + 1]
+            ]
+        );
+        compareBoundaryPixel(
+            position.x + position.width - 1,
+            y,
+            [
+                [position.x + position.width - 1, y - 1],
+                [position.x + position.width - 1, y],
+                [position.x + position.width - 1, y + 1]
+            ],
+            [
+                [position.x + position.width, y - 1],
+                [position.x + position.width, y],
+                [position.x + position.width, y + 1]
+            ]
+        );
+    }
+
+    const rawScore = count > 0 ? rawTotal / count : 0;
+    const previewBoundaryScore = count > 0 ? previewBoundaryTotal / count : 0;
+    const localContrastScore = count > 0 ? localContrastTotal / count : 0;
+    const normalizer = Math.max(1, previewBoundaryScore, localContrastScore);
+
+    return {
+        rawScore,
+        previewBoundaryScore,
+        localContrastScore,
+        normalizer,
+        normalizedScore: rawScore / normalizer
+    };
+}
+
+function measurePreviewBoundaryContinuity(candidateImageData, previewImageData, position) {
+    return measurePreviewBoundaryMetrics(candidateImageData, previewImageData, position).normalizedScore;
+}
+
 export function buildPreviewNeighborhoodPrior({
     previewImageData,
     position,
@@ -492,7 +618,10 @@ export function fitPreviewOnlyRenderModel({
     alphaBlurRadii = [0, 1],
     compositeBlurRadii = [0, 1],
     alphaGainCandidates = [1],
-    priorRadius = 6
+    blendStrengthCandidates = [0.85],
+    priorRadiusCandidates = null,
+    priorRadius = 6,
+    boundaryContinuityWeight = 0
 }) {
     if (!previewImageData || !standardAlphaMap || !position) {
         throw new TypeError('fitPreviewOnlyRenderModel requires previewImageData, standardAlphaMap, and position');
@@ -503,47 +632,113 @@ export function fitPreviewOnlyRenderModel({
         throw new RangeError('fitPreviewOnlyRenderModel requires a square ROI and matching standardAlphaMap size');
     }
 
-    const priorImageData = buildPreviewNeighborhoodPrior({
-        previewImageData,
-        position,
-        radius: priorRadius
-    });
+    const resolvedPriorRadiusCandidates = Array.isArray(priorRadiusCandidates) && priorRadiusCandidates.length > 0
+        ? priorRadiusCandidates
+        : [priorRadius];
 
-    let best = null;
-    for (const scale of scaleCandidates) {
-        for (const dy of shiftCandidates) {
-            for (const dx of shiftCandidates) {
-                const warped = warpAlphaMap(standardAlphaMap, size, { dx, dy, scale });
-                for (const alphaBlurRadius of alphaBlurRadii) {
-                    const alphaMap = blurAlphaMap(warped, size, alphaBlurRadius);
-                    for (const compositeBlurRadius of compositeBlurRadii) {
-                        for (const alphaGain of alphaGainCandidates) {
-                            const rendered = renderPreviewWatermarkObservation({
-                                sourceImageData: priorImageData,
-                                alphaMap,
-                                position,
-                                alphaGain,
-                                compositeBlurRadius
-                            });
-                            const score = measureRegionAbsDelta(rendered, previewImageData, position);
+    const alphaCandidates = [];
+    for (const candidatePriorRadius of resolvedPriorRadiusCandidates) {
+        const priorImageData = buildPreviewNeighborhoodPrior({
+            previewImageData,
+            position,
+            radius: candidatePriorRadius
+        });
 
-                            if (!best || score < best.score) {
-                                best = {
+        let alphaBestForRadius = null;
+        for (const scale of scaleCandidates) {
+            for (const dy of shiftCandidates) {
+                for (const dx of shiftCandidates) {
+                    const warped = warpAlphaMap(standardAlphaMap, size, { dx, dy, scale });
+                    for (const alphaBlurRadius of alphaBlurRadii) {
+                        const alphaMap = blurAlphaMap(warped, size, alphaBlurRadius);
+                        for (const compositeBlurRadius of compositeBlurRadii) {
+                            for (const alphaGain of alphaGainCandidates) {
+                                const rendered = renderPreviewWatermarkObservation({
+                                    sourceImageData: priorImageData,
                                     alphaMap,
+                                    position,
                                     alphaGain,
-                                    priorImageData,
-                                    params: {
-                                        shift: { dx, dy, scale },
-                                        alphaBlurRadius,
-                                        compositeBlurRadius,
-                                        priorRadius
-                                    },
-                                    score
-                                };
+                                    compositeBlurRadius
+                                });
+                                const forwardScore = measureRegionAbsDelta(rendered, previewImageData, position);
+
+                                if (!alphaBestForRadius || forwardScore < alphaBestForRadius.forwardScore) {
+                                    alphaBestForRadius = {
+                                        alphaMap,
+                                        alphaGain,
+                                        priorImageData,
+                                        params: {
+                                            shift: { dx, dy, scale },
+                                            alphaBlurRadius,
+                                            compositeBlurRadius,
+                                            priorRadius: candidatePriorRadius
+                                        },
+                                        forwardScore
+                                    };
+                                }
                             }
                         }
                     }
                 }
+            }
+        }
+
+        if (alphaBestForRadius) {
+            alphaCandidates.push(alphaBestForRadius);
+        }
+    }
+
+    let best = null;
+    for (const alphaCandidate of alphaCandidates) {
+        for (const blendStrength of blendStrengthCandidates) {
+            const restored = restorePreviewRegionWithNeighborhoodPrior({
+                previewImageData,
+                alphaMap: alphaCandidate.alphaMap,
+                position,
+                alphaGain: alphaCandidate.alphaGain,
+                priorImageData: alphaCandidate.priorImageData,
+                blendStrength
+            });
+            const rerendered = renderPreviewWatermarkObservation({
+                sourceImageData: restored,
+                alphaMap: alphaCandidate.alphaMap,
+                position,
+                alphaGain: alphaCandidate.alphaGain,
+                compositeBlurRadius: alphaCandidate.params.compositeBlurRadius
+            });
+            const inverseScore = measureRegionAbsDelta(rerendered, previewImageData, position);
+            const boundaryMetrics = boundaryContinuityWeight > 0
+                ? measurePreviewBoundaryMetrics(restored, previewImageData, position)
+                : {
+                    rawScore: 0,
+                    previewBoundaryScore: 0,
+                    localContrastScore: 0,
+                    normalizer: 1,
+                    normalizedScore: 0
+                };
+            const boundaryScore = boundaryMetrics.normalizedScore;
+            const score = inverseScore + boundaryScore * boundaryContinuityWeight;
+
+            if (!best || score < best.score) {
+                best = {
+                    alphaMap: alphaCandidate.alphaMap,
+                    alphaGain: alphaCandidate.alphaGain,
+                    priorImageData: alphaCandidate.priorImageData,
+                    params: {
+                        ...alphaCandidate.params,
+                        blendStrength
+                    },
+                    score,
+                    diagnostics: {
+                        forwardScore: alphaCandidate.forwardScore,
+                        inverseScore,
+                        boundaryScore,
+                        boundaryRawScore: boundaryMetrics.rawScore,
+                        boundaryPreviewScore: boundaryMetrics.previewBoundaryScore,
+                        boundaryContrastScore: boundaryMetrics.localContrastScore,
+                        boundaryNormalizer: boundaryMetrics.normalizer
+                    }
+                };
             }
         }
     }

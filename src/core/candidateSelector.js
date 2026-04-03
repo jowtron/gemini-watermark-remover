@@ -34,11 +34,14 @@ const STANDARD_FAST_PATH_GRADIENT_THRESHOLD = 0.08;
 const STANDARD_NEARBY_SEARCH_RESIDUAL_THRESHOLD = 0.18;
 const STANDARD_NEARBY_SEARCH_GRADIENT_THRESHOLD = 0.05;
 const STANDARD_LOCAL_SHIFT_STRONG_BASE_GRADIENT_SCORE = 0.35;
+const STANDARD_LOCAL_SHIFT_STRONG_BASE_SPATIAL_SCORE = 0.8;
 const STANDARD_LOCAL_SHIFT_WEAK_CANDIDATE_GRADIENT_SCORE = 0.12;
+const STANDARD_LOCAL_SHIFT_WEAK_CANDIDATE_SPATIAL_SCORE = 0.65;
 const STANDARD_LOCAL_SHIFT_MIN_VALIDATION_ADVANTAGE = 0.3;
 const TEMPLATE_ALIGN_SHIFTS = [-0.5, -0.25, 0, 0.25, 0.5];
 const TEMPLATE_ALIGN_SCALES = [0.99, 1, 1.01];
 const STANDARD_NEARBY_SHIFTS = [-12, -8, -4, 0, 4, 8, 12];
+const STANDARD_FINE_LOCAL_SHIFTS = [-2, -1, 0, 1, 2];
 const STANDARD_SIZE_JITTERS = [-12, -10, -8, -6, -4, -2, 2, 4, 6, 8, 10, 12];
 const PREVIEW_ANCHOR_MIN_SIZE = 24;
 const PREVIEW_ANCHOR_MAX_SIZE_RATIO = 1.05;
@@ -361,15 +364,19 @@ function isStandardCandidateSource(candidate) {
 }
 
 function shouldPreserveStrongStandardAnchor(currentBest, candidate) {
-    if (candidate?.provenance?.localShift !== true) return false;
+    if (candidate?.provenance?.localShift !== true && candidate?.provenance?.sizeJitter !== true) return false;
     if (currentBest?.provenance?.localShift === true) return false;
     if (!isStandardCandidateSource(currentBest) || !isStandardCandidateSource(candidate)) return false;
 
+    const baseSpatial = Number(currentBest.originalSpatialScore);
     const baseGradient = Number(currentBest.originalGradientScore);
+    const candidateSpatial = Number(candidate.originalSpatialScore);
     const candidateGradient = Number(candidate.originalGradientScore);
     const validationAdvantage = Number(currentBest.validationCost) - Number(candidate.validationCost);
     if (
+        !Number.isFinite(baseSpatial) ||
         !Number.isFinite(baseGradient) ||
+        !Number.isFinite(candidateSpatial) ||
         !Number.isFinite(candidateGradient) ||
         !Number.isFinite(validationAdvantage)
     ) {
@@ -377,10 +384,17 @@ function shouldPreserveStrongStandardAnchor(currentBest, candidate) {
     }
 
     // A nearby shift should not displace a default anchor that already carries
-    // strong watermark-shaped gradient evidence unless the shifted candidate is
+    // strong watermark evidence unless the shifted/jittered candidate is
     // materially better overall.
-    return baseGradient >= STANDARD_LOCAL_SHIFT_STRONG_BASE_GRADIENT_SCORE &&
-        candidateGradient < STANDARD_LOCAL_SHIFT_WEAK_CANDIDATE_GRADIENT_SCORE &&
+    const strongBaseSignal =
+        baseGradient >= STANDARD_LOCAL_SHIFT_STRONG_BASE_GRADIENT_SCORE ||
+        baseSpatial >= STANDARD_LOCAL_SHIFT_STRONG_BASE_SPATIAL_SCORE;
+    const weakCandidateSignal =
+        candidateGradient < STANDARD_LOCAL_SHIFT_WEAK_CANDIDATE_GRADIENT_SCORE ||
+        candidateSpatial < STANDARD_LOCAL_SHIFT_WEAK_CANDIDATE_SPATIAL_SCORE;
+
+    return strongBaseSignal &&
+        weakCandidateSignal &&
         validationAdvantage < STANDARD_LOCAL_SHIFT_MIN_VALIDATION_ADVANTAGE;
 }
 
@@ -591,6 +605,81 @@ function searchStandardSizeJitterCandidate({
             if (!candidate?.accepted) continue;
             bestCandidate = pickBetterCandidate(bestCandidate, candidate, 0.002);
         }
+    }
+
+    return bestCandidate;
+}
+
+function searchFineStandardLocalCandidate({
+    originalImageData,
+    seedCandidate,
+    adaptiveConfidence = null,
+    shiftCandidates = STANDARD_FINE_LOCAL_SHIFTS
+}) {
+    if (!seedCandidate?.alphaMap || !seedCandidate?.position) return null;
+
+    let bestCandidate = null;
+    for (const dy of shiftCandidates) {
+        for (const dx of shiftCandidates) {
+            if (dx === 0 && dy === 0) continue;
+
+            const candidatePosition = {
+                x: seedCandidate.position.x + dx,
+                y: seedCandidate.position.y + dy,
+                width: seedCandidate.position.width,
+                height: seedCandidate.position.height
+            };
+            if (candidatePosition.x < 0 || candidatePosition.y < 0) continue;
+            if (candidatePosition.x + candidatePosition.width > originalImageData.width) continue;
+            if (candidatePosition.y + candidatePosition.height > originalImageData.height) continue;
+
+            const candidate = evaluateRestorationCandidate({
+                originalImageData,
+                alphaMap: seedCandidate.alphaMap,
+                position: candidatePosition,
+                source: `${seedCandidate.source}+local`,
+                config: seedCandidate.config,
+                baselineNearBlackRatio: calculateNearBlackRatio(originalImageData, candidatePosition),
+                adaptiveConfidence,
+                provenance: mergeCandidateProvenance(seedCandidate.provenance, { localShift: true }),
+                includeImageData: false
+            });
+
+            if (!candidate?.accepted) continue;
+            bestCandidate = pickBetterCandidate(bestCandidate, candidate, 0.002);
+        }
+    }
+
+    return bestCandidate;
+}
+
+function searchCandidateAlphaGain({
+    originalImageData,
+    seedCandidate,
+    adaptiveConfidence = null,
+    alphaGainCandidates = []
+}) {
+    if (!seedCandidate?.alphaMap || !seedCandidate?.position) return null;
+
+    let bestCandidate = null;
+    for (const candidateGain of alphaGainCandidates) {
+        if (!Number.isFinite(candidateGain) || candidateGain <= 1) continue;
+
+        const candidate = evaluateRestorationCandidate({
+            originalImageData,
+            alphaMap: seedCandidate.alphaMap,
+            position: seedCandidate.position,
+            source: `${seedCandidate.source}+gain`,
+            config: seedCandidate.config,
+            baselineNearBlackRatio: calculateNearBlackRatio(originalImageData, seedCandidate.position),
+            adaptiveConfidence,
+            alphaGain: candidateGain,
+            provenance: seedCandidate.provenance,
+            includeImageData: false
+        });
+
+        if (!candidate?.accepted) continue;
+        bestCandidate = pickBetterCandidate(bestCandidate, candidate, 0.002);
     }
 
     return bestCandidate;
@@ -871,7 +960,7 @@ export function selectInitialCandidate({
 
     let baseCandidate = null;
     let baseDecisionTier = 'insufficient';
-    if (hasReliableStandardMatch) {
+    if (hasReliableStandardMatch && standardTrial?.accepted) {
         baseCandidate = standardTrial;
         baseDecisionTier = 'direct-match';
     } else if (standardTrial?.accepted) {
@@ -882,26 +971,44 @@ export function selectInitialCandidate({
         baseDecisionTier = 'validated-match';
     }
 
+    if (
+        !baseCandidate &&
+        standardTrial &&
+        hasReliableStandardMatch
+    ) {
+        const gainedStandardCandidate = searchCandidateAlphaGain({
+            originalImageData,
+            seedCandidate: {
+                ...standardTrial,
+                source: 'standard+validated'
+            },
+            adaptiveConfidence,
+            alphaGainCandidates
+        });
+        if (gainedStandardCandidate) {
+            baseCandidate = gainedStandardCandidate;
+            baseDecisionTier = 'validated-match';
+        }
+    }
+
     for (const candidate of standardTrials) {
         if (!candidate || candidate === standardTrial) continue;
-        const standardCandidate = hasReliableStandardWatermarkSignal({
+        const hasReliableCandidateMatch = hasReliableStandardWatermarkSignal({
             spatialScore: candidate.originalSpatialScore,
             gradientScore: candidate.originalGradientScore
-        })
-            ? candidate
-            : (candidate.accepted
-                ? {
+        });
+        const standardCandidate = candidate.accepted
+            ? (hasReliableCandidateMatch
+                ? candidate
+                : {
                     ...candidate,
                     source: `${candidate.source}+validated`
-                }
-                : null);
+                })
+            : null;
         const previousCandidate = baseCandidate;
         baseCandidate = pickBetterCandidate(baseCandidate, standardCandidate, 0.002);
         if (baseCandidate !== previousCandidate && baseCandidate) {
-            baseDecisionTier = hasReliableStandardWatermarkSignal({
-                spatialScore: candidate.originalSpatialScore,
-                gradientScore: candidate.originalGradientScore
-            })
+            baseDecisionTier = hasReliableCandidateMatch
                 ? 'direct-match'
                 : 'validated-match';
         }
@@ -952,6 +1059,27 @@ export function selectInitialCandidate({
         }
     }
 
+    if (
+        baseDecisionTier !== 'direct-match' &&
+        baseCandidate?.provenance?.sizeJitter === true &&
+        !baseCandidate?.provenance?.previewAnchor &&
+        isStandardCandidateSource(baseCandidate) &&
+        shouldEscalateSearch(baseCandidate)
+    ) {
+        const fineLocalCandidate = searchFineStandardLocalCandidate({
+            originalImageData,
+            seedCandidate: baseCandidate,
+            adaptiveConfidence
+        });
+        if (fineLocalCandidate) {
+            const previousCandidate = baseCandidate;
+            baseCandidate = pickBetterCandidate(baseCandidate, fineLocalCandidate, 0.002);
+            if (baseCandidate !== previousCandidate && baseCandidate) {
+                baseDecisionTier = 'validated-match';
+            }
+        }
+    }
+
     const shouldEvaluateAdaptive = () => {
         if (!allowAdaptiveSearch || !alpha96) return false;
         if (!baseCandidate) return true;
@@ -973,18 +1101,19 @@ export function selectInitialCandidate({
     }
 
     if (adaptiveTrial) {
-        const adaptiveCandidate = hasReliableAdaptiveWatermarkSignal(adaptive)
-            ? adaptiveTrial
-            : (adaptiveTrial.accepted
-                ? {
+        const hasReliableAdaptiveMatch = hasReliableAdaptiveWatermarkSignal(adaptive);
+        const adaptiveCandidate = adaptiveTrial.accepted
+            ? (hasReliableAdaptiveMatch
+                ? adaptiveTrial
+                : {
                     ...adaptiveTrial,
                     source: `${adaptiveTrial.source}+validated`
-                }
-                : null);
+                })
+            : null;
         const previousCandidate = baseCandidate;
         baseCandidate = pickBetterCandidate(baseCandidate, adaptiveCandidate, 0.002);
         if (baseCandidate !== previousCandidate && baseCandidate) {
-            baseDecisionTier = hasReliableAdaptiveWatermarkSignal(adaptive)
+            baseDecisionTier = hasReliableAdaptiveMatch
                 ? 'direct-match'
                 : 'validated-match';
         }
@@ -1009,6 +1138,16 @@ export function selectInitialCandidate({
             if (baseCandidate !== previousCandidate && baseCandidate) {
                 baseDecisionTier = 'validated-match';
             }
+        }
+    }
+
+    if (!baseCandidate) {
+        if (hasReliableStandardMatch && standardTrial) {
+            baseCandidate = standardTrial;
+            baseDecisionTier = 'direct-match';
+        } else if (hasReliableAdaptiveWatermarkSignal(adaptive) && adaptiveTrial) {
+            baseCandidate = adaptiveTrial;
+            baseDecisionTier = 'direct-match';
         }
     }
 

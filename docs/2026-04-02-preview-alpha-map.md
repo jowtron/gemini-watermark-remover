@@ -519,3 +519,316 @@ node scripts/calibrate-preview-alpha.js \
 - `pnpm test`
 
 以上已通过。
+
+## 2026-04-03 第七轮结果
+
+### 本轮目标
+
+把 `preview-only` 的评分目标再往前推一步，但保持改动仍然只在离线研究链路。
+
+上一轮已经确认：
+
+- harmonic prior 本身已经不再是完全无效的
+- 真正的问题是 `fitPreviewOnlyRenderModel(...)` 仍然只在拟合 watermark 参数
+- 它没有把“最终恢复出来的 clean ROI”真正纳入目标函数
+
+### 本轮改动
+
+- `src/core/previewAlphaCalibration.js`
+  - `fitPreviewOnlyRenderModel(...)` 改成两段式：
+    1. 先用旧的 prior forward score 粗选 `alpha / shift / blur`
+    2. 再在固定 alpha candidate 上搜索 `blendStrength`
+  - 新增 final restored output 的 inverse-consistency 打分
+  - 新增 preview 边界连续性评分
+- `tests/core/previewAlphaCalibration.test.js`
+  - 新增 synthetic 回归：
+    - 当 `blendStrength` 可搜索时，拟合器必须真正考虑最终恢复结果，而不能只看 prior 的 forward render
+- `scripts/calibrate-preview-alpha.js`
+  - preview-only 标定现在会输出：
+    - `blendStrength`
+    - `previewOnlyDiagnostics.forwardScore`
+    - `previewOnlyDiagnostics.inverseScore`
+    - `previewOnlyDiagnostics.boundaryScore`
+  - 当前离线脚本默认会搜索：
+    - `blendStrengthCandidates = [0.55, 0.7, 0.85, 1]`
+    - `boundaryContinuityWeight = 5`
+
+### 本轮关键判断
+
+本轮最重要的发现不是某个固定参数，而是：
+
+1. 如果把 `blendStrength` 和 alpha 参数一起联合搜索，优化会退化到“更像原 preview”的方向。
+2. 更稳的做法是：
+   - 先粗定 alpha candidate
+   - 再单独 refine `blendStrength`
+
+这说明当前 preview-only 逆问题里，`blendStrength` 更像“恢复阶段参数”，而不是前向 watermark 参数本身。
+
+### 真实样本结果
+
+当前脚本默认配置下，preview-only 会输出：
+
+- `21-9-preview.png`
+  - `shift = (0, 0, 1.01)`
+  - `blendStrength = 1`
+  - `forwardScore ≈ 12.22`
+  - `inverseScore ≈ 3.89`
+  - `boundaryScore ≈ 7.80`
+  - 相对 `source-resized` 的 ROI 平均绝对误差约：
+    - 生产输出 `≈ 37.19`
+    - preview-only 当前结果 `≈ 34.70`
+- `9-16-preview.png`
+  - `shift = (0, 0.5, 0.99)`
+  - `blendStrength = 1`
+  - `forwardScore ≈ 7.17`
+  - `inverseScore ≈ 2.03`
+  - `boundaryScore ≈ 3.85`
+  - 相对 `source-resized` 的 ROI 平均绝对误差约：
+    - 生产输出 `≈ 9.19`
+    - preview-only 当前结果 `≈ 7.05`
+
+### 新判断
+
+这轮之后，问题边界更清楚了：
+
+- preview-only 现在已经不只是：
+  - “构造一个 prior”
+  - “拟合一个 alpha 参数”
+- 它已经开始显式地把：
+  - 最终恢复结果
+  - 再正向渲染一致性
+  - 边界连续性
+  一起纳入评分
+
+但 `21-9-preview` 仍然只获得有限改善，说明：
+
+- 当前 boundary penalty 的方向是对的
+- 但量纲和权重还比较粗
+- 下一步更值得做的是：
+  - 校准 boundary score 的尺度
+  - 或进一步搜索 `priorRadiusCandidates`
+  - 而不是再回去堆新的 cleanup 规则
+
+### 验证
+
+- `node --test tests/core/previewAlphaCalibration.test.js tests/scripts/previewAlphaCalibration.test.js`
+
+以上已通过。
+
+## 2026-04-03 第八轮结果
+
+### 本轮目标
+
+继续把 `preview-only` 评分目标做实，但这次聚焦在另一个前一轮暴露出来的问题：
+
+- `priorRadius` 已经证明会显著影响结果
+- 但如果只按全局最小 `forwardScore` 选 candidate，会把 `priorRadius` 误判成“只是一个更前面的粗筛参数”
+
+实际上，`priorRadius` 会影响：
+
+- 邻域 prior 的形态
+- 后续 restore 的边界连续性
+- 最终 `blendStrength` refine 的可行空间
+
+所以它不能只按前向拟合优劣决定。
+
+### 本轮改动
+
+- `src/core/previewAlphaCalibration.js`
+  - `fitPreviewOnlyRenderModel(...)` 新增 `priorRadiusCandidates`
+  - 搜索流程改成：
+    1. 对每个 `priorRadius` 单独求一个最优 alpha candidate
+    2. 再把这些 candidate 放到最终评分阶段统一比较
+  - 不再让“全局最小 forward-only prior”直接抢占最终结果
+- `tests/core/previewAlphaCalibration.test.js`
+  - 新增 `priorRadius` 搜索回归
+  - 新增“跨 `priorRadius` 的最终评分比较”回归
+- `scripts/calibrate-preview-alpha.js`
+  - preview-only 默认搜索现在改为：
+    - `blendStrengthCandidates = [0.55, 0.7, 0.85, 1]`
+    - `priorRadiusCandidates = [4, 6, 8, 10]`
+    - `boundaryContinuityWeight = 12`
+
+### 新增测试结论
+
+本轮补的两个新回归分别证明：
+
+1. `priorRadius` 搜索本身是必要的。
+2. 即使搜索了 `priorRadius`，也不能只看哪一个半径的 `forwardScore` 最小。
+   - 必须先保留每个半径自己的候选
+   - 再在最终 restore 评分阶段比较
+
+这两点都已经通过新的 synthetic 回归固定下来。
+
+### 真实样本结果
+
+按当前脚本默认配置，preview-only 当前会收敛到：
+
+- `21-9-preview.png`
+  - `shift = (0, 0, 1.01)`
+  - `priorRadius = 8`
+  - `blendStrength = 1`
+  - `forwardScore ≈ 12.37`
+  - `inverseScore ≈ 3.93`
+  - `boundaryScore ≈ 7.79`
+  - 相对 `source-resized` 的 ROI 平均绝对误差约：
+    - 生产输出 `≈ 37.19`
+    - preview-only 当前结果 `≈ 34.60`
+- `9-16-preview.png`
+  - `shift = (0, 0.5, 0.99)`
+  - `priorRadius = 6`
+  - `blendStrength = 1`
+  - `forwardScore ≈ 7.17`
+  - `inverseScore ≈ 2.03`
+  - `boundaryScore ≈ 3.85`
+  - 相对 `source-resized` 的 ROI 平均绝对误差约：
+    - 生产输出 `≈ 9.19`
+    - preview-only 当前结果 `≈ 7.05`
+
+和第七轮相比，这一轮最关键的变化不是绝对数值跳很多，而是：
+
+- `21-9-preview` 不再被固定在 `priorRadius = 6`
+- preview-only 搜索链路开始真正具备“多尺度 prior 候选比较”的能力
+
+### 当前判断
+
+到这一步，preview-only 方向的最小验证链路已经比第七轮完整很多：
+
+- 搜 `alpha / shift / blur`
+- 搜 `blendStrength`
+- 搜 `priorRadius`
+- 并且 `priorRadius` 不再只受 forward-only 粗筛控制
+
+剩下最值得继续做的不是继续加更多自由度，而是：
+
+1. 重新标定 boundary score 的量纲
+2. 让 `boundaryContinuityWeight` 更可解释，而不是继续靠手工 sweep 常数
+
+因为 `21-9-preview` 这种 stubborn 样本当前仍然只获得有限改善，说明：
+
+- 多尺度 prior 已经有用
+- 但最终评分函数还没有完全对齐用户目测的“残余轮廓感”
+
+### 验证
+
+- `node --test tests/core/previewAlphaCalibration.test.js tests/scripts/previewAlphaCalibration.test.js`
+
+以上已通过。
+
+## 2026-04-03 第九轮结果
+
+### 本轮目标
+
+继续推进上一轮留下的核心问题：
+
+- `boundaryScore` 的方向基本是对的
+- 但它一直是绝对通道差量纲
+- 不同样本的边界本底对比度不同，导致同一组 `boundaryContinuityWeight` 很难解释
+
+这轮不再加新的自由度，先把 boundary 指标本身去量纲。
+
+### 本轮改动
+
+- `src/core/previewAlphaCalibration.js`
+  - 新增 `measurePreviewBoundaryMetrics(...)`
+  - boundary 诊断现在会同时输出：
+    - `boundaryRawScore`
+    - `boundaryPreviewScore`
+    - `boundaryContrastScore`
+    - `boundaryNormalizer`
+    - `boundaryScore`
+  - 其中当前 `boundaryScore` 已改为归一化后的分数，而不是绝对通道差
+- `fitPreviewOnlyRenderModel(...)`
+  - 最终评分阶段改为使用归一化后的 boundary 分数
+- `scripts/calibrate-preview-alpha.js`
+  - 离线脚本现在会把上述 boundary 诊断一并写入产物
+- `tests/core/previewAlphaCalibration.test.js`
+  - 新增 synthetic 回归，证明：
+    - 在“相同相对边界改善、不同绝对对比度”的两个样本里
+    - raw boundary 会随对比度一起放大
+    - normalized boundary 会保持接近
+
+### synthetic 结论
+
+这轮新增的红测固定了一个此前只有直觉、没有回归保护的问题：
+
+- 如果两个候选在“相对边界改善比例”上等价
+- 仅仅因为一个样本的边界本底对比度更高
+- raw boundary 就会把它判得更重
+
+归一化后，这种跨样本量纲偏差被压掉了。
+
+### 真实样本结果
+
+按当前脚本默认配置：
+
+- `blendStrengthCandidates = [0.55, 0.7, 0.85, 1]`
+- `priorRadiusCandidates = [4, 6, 8, 10]`
+- `boundaryContinuityWeight = 12`
+
+当前离线结果变成：
+
+- `21-9-preview.png`
+  - `shift = (0, 0, 1.01)`
+  - `priorRadius = 4`
+  - `blendStrength = 0.55`
+  - `forwardScore ≈ 11.959259`
+  - `inverseScore ≈ 2.593704`
+  - `boundaryScore ≈ 0.733149`
+  - `boundaryRawScore ≈ 8.64751`
+  - `boundaryPreviewScore ≈ 11.795019`
+  - 相对 `source-resized` 的 ROI 平均绝对误差约：
+    - 生产输出 `≈ 37.19`
+    - preview-only 当前结果 `≈ 35.15`
+- `9-16-preview.png`
+  - `shift = (0, 0.5, 0.99)`
+  - `priorRadius = 6`
+  - `blendStrength = 0.55`
+  - `forwardScore ≈ 7.173061`
+  - `inverseScore ≈ 1.163265`
+  - `boundaryScore ≈ 0.866071`
+  - `boundaryRawScore ≈ 4.041667`
+  - `boundaryPreviewScore ≈ 4.666667`
+  - 相对 `source-resized` 的 ROI 平均绝对误差约：
+    - 生产输出 `≈ 9.19`
+    - preview-only 当前结果 `≈ 7.85`
+
+### 本轮关键判断
+
+这轮最重要的结果不是数值大跳，而是问题边界又收紧了一步：
+
+1. 先前 raw boundary 的确带有明显跨样本量纲偏差。
+   - 旧诊断里，`21-9-preview` 的 raw boundary 明显大于 `9-16-preview`
+   - 但归一化后，反而是：
+     - `21-9-preview boundaryScore ≈ 0.73`
+     - `9-16-preview boundaryScore ≈ 0.87`
+   - 这说明 raw 数字大，不等于相对边界连续性更差。
+
+2. 但“只把 boundary 去量纲”还不够。
+   - 归一化后，拟合器明显更偏向较低的 `blendStrength = 0.55`
+   - 这表明当前最终评分里，真正开始主导的已经不是 boundary 量纲，而是 `inverseScore`
+
+3. 因此，下一步更该怀疑的是：
+   - `inverse consistency` 本身和用户目测残影之间并不完全对齐
+   - 现在的问题已经从“boundary 权重太手工”进一步收敛成：
+     - 如何让最终评分更直接对应“残余轮廓感”
+
+### 当前结论更新
+
+当前可以明确说：
+
+- boundary 去量纲这步是必要的
+- 它让不同样本的诊断终于能放在一个更可比较的尺度上
+- 但它没有直接解决 stubborn 样本仍有残影的问题
+
+下一步最值得做的，不再是继续 sweep `boundaryContinuityWeight`，而是二选一：
+
+1. 把 boundary 项改成“相对 preview baseline 的改善量”而不只是归一化绝对值
+2. 给最终评分再补一个更直接针对 residual contour 的项，而不只依赖 `inverseScore`
+
+### 验证
+
+- `node --test tests/core/previewAlphaCalibration.test.js tests/scripts/previewAlphaCalibration.test.js`
+- `pnpm test`
+
+以上已通过。

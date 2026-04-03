@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
     assessReferenceTextureAlignment,
+    assessReferenceTextureAlignmentFromStats,
     calculateNearBlackRatio,
     cloneImageData
 } from '../../src/core/restorationMetrics.js';
@@ -61,6 +62,34 @@ test('assessReferenceTextureAlignment should mark a darker flatter candidate as 
     assert.equal(assessment.tooFlat, true);
     assert.equal(assessment.hardReject, true);
     assert.ok(assessment.texturePenalty > 0, `texturePenalty=${assessment.texturePenalty}`);
+});
+
+test('assessReferenceTextureAlignmentFromStats should hard reject visibly darker candidates on flat backgrounds even when texture is preserved', () => {
+    const assessment = assessReferenceTextureAlignmentFromStats({
+        position: { x: 24, y: 48, width: 48, height: 48 },
+        candidateTextureStats: {
+            meanLum: 37,
+            stdLum: 3.2
+        },
+        referenceImageData: {
+            width: 96,
+            height: 96,
+            data: (() => {
+                const data = new Uint8ClampedArray(96 * 96 * 4);
+                for (let i = 0; i < data.length; i += 4) {
+                    data[i] = 42;
+                    data[i + 1] = 42;
+                    data[i + 2] = 42;
+                    data[i + 3] = 255;
+                }
+                return data;
+            })()
+        }
+    });
+
+    assert.equal(assessment.tooDark, true);
+    assert.equal(assessment.tooFlat, false);
+    assert.equal(assessment.hardReject, true);
 });
 
 test('calculateNearBlackRatio should count only near-black pixels inside the target region', () => {

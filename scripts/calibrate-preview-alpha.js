@@ -132,7 +132,10 @@ export async function calibratePreviewAlphaPairs({
         const previewOnly = fitPreviewOnlyRenderModel({
             previewImageData,
             standardAlphaMap,
-            position
+            position,
+            blendStrengthCandidates: [0.55, 0.7, 0.85, 1],
+            priorRadiusCandidates: [4, 6, 8, 10],
+            boundaryContinuityWeight: 12
         });
         const freeformBucket = freeformBuckets.get(position.width) ?? [];
         freeformBucket.push(estimatedAlphaMap);
@@ -160,7 +163,17 @@ export async function calibratePreviewAlphaPairs({
                 shift: previewOnly.params.shift,
                 alphaBlurRadius: previewOnly.params.alphaBlurRadius,
                 compositeBlurRadius: previewOnly.params.compositeBlurRadius,
+                blendStrength: previewOnly.params.blendStrength,
                 priorRadius: previewOnly.params.priorRadius
+            },
+            previewOnlyDiagnostics: {
+                forwardScore: Number((previewOnly.diagnostics?.forwardScore ?? 0).toFixed(6)),
+                inverseScore: Number((previewOnly.diagnostics?.inverseScore ?? 0).toFixed(6)),
+                boundaryScore: Number((previewOnly.diagnostics?.boundaryScore ?? 0).toFixed(6)),
+                boundaryRawScore: Number((previewOnly.diagnostics?.boundaryRawScore ?? 0).toFixed(6)),
+                boundaryPreviewScore: Number((previewOnly.diagnostics?.boundaryPreviewScore ?? 0).toFixed(6)),
+                boundaryContrastScore: Number((previewOnly.diagnostics?.boundaryContrastScore ?? 0).toFixed(6)),
+                boundaryNormalizer: Number((previewOnly.diagnostics?.boundaryNormalizer ?? 1).toFixed(6))
             }
         });
     }
