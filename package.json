@@ -51,7 +51,8 @@
     "benchmark:samples": "node scripts/sample-benchmark.js",
     "benchmark:userscript": "node scripts/userscript-benchmark.js",
     "serve": "pnpm dlx serve dist",
-    "export:samples": "node scripts/export-fixed-samples.js"
+    "export:samples": "node scripts/export-fixed-samples.js",
+    "calibrate:preview-alpha": "node scripts/calibrate-preview-alpha.js"
   },
   "dependencies": {
     "jszip": "^3.10.1",

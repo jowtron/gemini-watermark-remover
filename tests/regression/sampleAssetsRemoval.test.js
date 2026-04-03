@@ -264,6 +264,69 @@ function getRegionStats(imageData, region) {
     };
 }
 
+function measureAlphaBandHalo(imageData, position, alphaMap, {
+    minAlpha = 0.12,
+    maxAlpha = 0.35,
+    outsideAlphaMax = 0.01,
+    outerMargin = 3
+} = {}) {
+    let bandSum = 0;
+    let bandSq = 0;
+    let bandCount = 0;
+    let outerSum = 0;
+    let outerSq = 0;
+    let outerCount = 0;
+
+    for (let row = -outerMargin; row < position.height + outerMargin; row++) {
+        for (let col = -outerMargin; col < position.width + outerMargin; col++) {
+            const pixelX = position.x + col;
+            const pixelY = position.y + row;
+            if (pixelX < 0 || pixelY < 0 || pixelX >= imageData.width || pixelY >= imageData.height) {
+                continue;
+            }
+
+            const pixelIndex = (pixelY * imageData.width + pixelX) * 4;
+            const luminance =
+                0.2126 * imageData.data[pixelIndex] +
+                0.7152 * imageData.data[pixelIndex + 1] +
+                0.0722 * imageData.data[pixelIndex + 2];
+            const insideRegion = row >= 0 && col >= 0 && row < position.height && col < position.width;
+            const alpha = insideRegion
+                ? alphaMap[row * position.width + col]
+                : 0;
+
+            if (insideRegion && alpha >= minAlpha && alpha <= maxAlpha) {
+                bandSum += luminance;
+                bandSq += luminance * luminance;
+                bandCount++;
+                continue;
+            }
+
+            if (!insideRegion || alpha <= outsideAlphaMax) {
+                outerSum += luminance;
+                outerSq += luminance * luminance;
+                outerCount++;
+            }
+        }
+    }
+
+    const bandMeanLum = bandCount > 0 ? bandSum / bandCount : 0;
+    const outerMeanLum = outerCount > 0 ? outerSum / outerCount : 0;
+    const bandStdLum = bandCount > 0 ? Math.sqrt(Math.max(0, bandSq / bandCount - bandMeanLum * bandMeanLum)) : 0;
+    const outerStdLum = outerCount > 0 ? Math.sqrt(Math.max(0, outerSq / outerCount - outerMeanLum * outerMeanLum)) : 0;
+
+    return {
+        bandCount,
+        outerCount,
+        bandMeanLum,
+        outerMeanLum,
+        deltaLum: bandMeanLum - outerMeanLum,
+        bandStdLum,
+        outerStdLum,
+        visibility: (bandMeanLum - outerMeanLum) / Math.max(1, outerStdLum)
+    };
+}
+
 function refineSubpixelOutline({
     originalImageData,
     alphaMap,
@@ -868,8 +931,14 @@ test('21-9-preview.png should use preview-anchor edge cleanup to reduce residual
             `expected preview watermark size near 30px, got ${result.meta.position.width}`
         );
         assert.ok(
-            result.meta.detection.processedGradientScore < 0.4,
-            `expected residual preview gradient < 0.4, got ${result.meta.detection.processedGradientScore}`
+            result.meta.detection.processedGradientScore < 0.15,
+            `expected residual preview gradient < 0.15, got ${result.meta.detection.processedGradientScore}`
+        );
+
+        const halo = measureAlphaBandHalo(result.imageData, result.meta.position, interpolateAlphaMap(alpha96, 96, result.meta.position.width));
+        assert.ok(
+            halo.deltaLum < 4,
+            `expected preview halo delta < 4, got ${halo.deltaLum}`
         );
     } finally {
         await browser.close();

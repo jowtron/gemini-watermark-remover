@@ -10,6 +10,7 @@ import {
     scoreRegion,
     selectInitialCandidate
 } from './candidateSelector.js';
+import { assessAlphaBandHalo } from './restorationMetrics.js';
 import { createSelectionDebugSummary } from './selectionDebug.js';
 import {
     calculateWatermarkPosition,
@@ -31,10 +32,14 @@ const PREVIEW_EDGE_CLEANUP_SPATIAL_THRESHOLD = 0.08;
 const PREVIEW_EDGE_CLEANUP_GRADIENT_THRESHOLD = 0.24;
 const PREVIEW_EDGE_CLEANUP_MIN_GRADIENT_IMPROVEMENT = 0.03;
 const PREVIEW_EDGE_CLEANUP_MAX_SPATIAL_DRIFT = 0.04;
+const PREVIEW_EDGE_CLEANUP_HALO_WEIGHT = 0.02;
+const PREVIEW_EDGE_CLEANUP_MIN_HALO_REDUCTION = 1.5;
+const PREVIEW_EDGE_CLEANUP_STRONG_HALO_THRESHOLD = 4;
 const PREVIEW_EDGE_CLEANUP_PRESETS = Object.freeze([
     { minAlpha: 0.02, maxAlpha: 0.45, radius: 2, strength: 0.7, outsideAlphaMax: 0.05 },
     { minAlpha: 0.05, maxAlpha: 0.55, radius: 3, strength: 0.7, outsideAlphaMax: 0.08 },
-    { minAlpha: 0.1, maxAlpha: 0.7, radius: 3, strength: 0.8, outsideAlphaMax: 0.12 }
+    { minAlpha: 0.1, maxAlpha: 0.7, radius: 3, strength: 0.8, outsideAlphaMax: 0.12 },
+    { minAlpha: 0.01, maxAlpha: 0.35, radius: 4, strength: 1.4, outsideAlphaMax: 0.05 }
 ]);
 const PREVIEW_EDGE_CLEANUP_STRONG_GRADIENT_THRESHOLD = 0.45;
 const PREVIEW_EDGE_CLEANUP_AGGRESSIVE_PRESETS = Object.freeze([
@@ -445,6 +450,11 @@ function refinePreviewResidualEdge({
 
     const baselineNearBlackRatio = calculateNearBlackRatio(sourceImageData, position);
     const maxAllowedNearBlackRatio = Math.min(1, baselineNearBlackRatio + MAX_NEAR_BLACK_RATIO_INCREASE);
+    const baselineHalo = assessAlphaBandHalo({
+        imageData: sourceImageData,
+        position,
+        alphaMap
+    });
     const presets = allowAggressivePresets &&
         baselineGradientScore >= PREVIEW_EDGE_CLEANUP_STRONG_GRADIENT_THRESHOLD &&
         Math.abs(baselineSpatialScore) <= 0.05
@@ -472,6 +482,11 @@ function refinePreviewResidualEdge({
             alphaMap,
             region: { x: position.x, y: position.y, size: position.width }
         });
+        const halo = assessAlphaBandHalo({
+            imageData: candidate,
+            position,
+            alphaMap
+        });
 
         const presetMinGradientImprovement = preset.minGradientImprovement ?? minGradientImprovement;
         const presetMaxSpatialDrift = preset.maxSpatialDrift ?? maxSpatialDrift;
@@ -479,14 +494,21 @@ function refinePreviewResidualEdge({
         const improvedGradient = gradientScore <= baselineGradientScore - presetMinGradientImprovement;
         const keptSpatial = Math.abs(spatialScore) <= Math.abs(baselineSpatialScore) + presetMaxSpatialDrift;
         const keptResidualWithinTarget = Math.abs(spatialScore) <= presetMaxAcceptedSpatial;
-        if (!improvedGradient || !keptSpatial || !keptResidualWithinTarget) continue;
+        const baselinePositiveHalo = baselineHalo.positiveDeltaLum;
+        const candidatePositiveHalo = halo.positiveDeltaLum;
+        const improvedHalo = baselinePositiveHalo < PREVIEW_EDGE_CLEANUP_STRONG_HALO_THRESHOLD ||
+            candidatePositiveHalo <= baselinePositiveHalo - PREVIEW_EDGE_CLEANUP_MIN_HALO_REDUCTION;
+        if (!improvedGradient || !keptSpatial || !keptResidualWithinTarget || !improvedHalo) continue;
 
-        const cost = Math.abs(spatialScore) * 0.6 + Math.max(0, gradientScore);
+        const cost = Math.abs(spatialScore) * 0.6 +
+            Math.max(0, gradientScore) +
+            candidatePositiveHalo * PREVIEW_EDGE_CLEANUP_HALO_WEIGHT;
         if (!best || cost < best.cost) {
             best = {
                 imageData: candidate,
                 spatialScore,
                 gradientScore,
+                halo,
                 cost
             };
         }

@@ -6,6 +6,10 @@ import {
 const NEAR_BLACK_THRESHOLD = 5;
 const TEXTURE_REFERENCE_MARGIN = 1;
 const TEXTURE_STD_FLOOR_RATIO = 0.8;
+const DEFAULT_HALO_MIN_ALPHA = 0.12;
+const DEFAULT_HALO_MAX_ALPHA = 0.35;
+const DEFAULT_HALO_OUTSIDE_ALPHA_MAX = 0.01;
+const DEFAULT_HALO_OUTER_MARGIN = 3;
 
 export function cloneImageData(imageData) {
     if (typeof ImageData !== 'undefined' && imageData instanceof ImageData) {
@@ -71,6 +75,75 @@ function calculateRegionTextureStats(imageData, region) {
 
 export function getRegionTextureStats(imageData, region) {
     return calculateRegionTextureStats(imageData, region);
+}
+
+export function assessAlphaBandHalo({
+    imageData,
+    position,
+    alphaMap,
+    minAlpha = DEFAULT_HALO_MIN_ALPHA,
+    maxAlpha = DEFAULT_HALO_MAX_ALPHA,
+    outsideAlphaMax = DEFAULT_HALO_OUTSIDE_ALPHA_MAX,
+    outerMargin = DEFAULT_HALO_OUTER_MARGIN
+}) {
+    let bandSum = 0;
+    let bandSq = 0;
+    let bandCount = 0;
+    let outerSum = 0;
+    let outerSq = 0;
+    let outerCount = 0;
+
+    for (let row = -outerMargin; row < position.height + outerMargin; row++) {
+        for (let col = -outerMargin; col < position.width + outerMargin; col++) {
+            const pixelX = position.x + col;
+            const pixelY = position.y + row;
+            if (pixelX < 0 || pixelY < 0 || pixelX >= imageData.width || pixelY >= imageData.height) {
+                continue;
+            }
+
+            const pixelIndex = (pixelY * imageData.width + pixelX) * 4;
+            const luminance =
+                0.2126 * imageData.data[pixelIndex] +
+                0.7152 * imageData.data[pixelIndex + 1] +
+                0.0722 * imageData.data[pixelIndex + 2];
+            const insideRegion = row >= 0 && col >= 0 && row < position.height && col < position.width;
+            const alpha = insideRegion
+                ? alphaMap[row * position.width + col]
+                : 0;
+
+            if (insideRegion && alpha >= minAlpha && alpha <= maxAlpha) {
+                bandSum += luminance;
+                bandSq += luminance * luminance;
+                bandCount++;
+                continue;
+            }
+
+            if (!insideRegion || alpha <= outsideAlphaMax) {
+                outerSum += luminance;
+                outerSq += luminance * luminance;
+                outerCount++;
+            }
+        }
+    }
+
+    const bandMeanLum = bandCount > 0 ? bandSum / bandCount : 0;
+    const outerMeanLum = outerCount > 0 ? outerSum / outerCount : 0;
+    const bandStdLum = bandCount > 0 ? Math.sqrt(Math.max(0, bandSq / bandCount - bandMeanLum * bandMeanLum)) : 0;
+    const outerStdLum = outerCount > 0 ? Math.sqrt(Math.max(0, outerSq / outerCount - outerMeanLum * outerMeanLum)) : 0;
+    const deltaLum = bandMeanLum - outerMeanLum;
+    const visibility = deltaLum / Math.max(1, outerStdLum);
+
+    return {
+        bandCount,
+        outerCount,
+        bandMeanLum,
+        outerMeanLum,
+        bandStdLum,
+        outerStdLum,
+        deltaLum,
+        positiveDeltaLum: Math.max(0, deltaLum),
+        visibility
+    };
 }
 
 function getReferenceRegion(position, imageData) {
