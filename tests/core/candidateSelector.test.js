@@ -219,6 +219,35 @@ test('pickBetterCandidate should still allow a local shift when the default anch
     assert.equal(selected, recoveredLocalShiftCandidate);
 });
 
+test('pickBetterCandidate should preserve a clean default anchor when a local shift leaves higher residual gradient', () => {
+    const defaultAnchorCandidate = {
+        accepted: true,
+        source: 'standard+validated',
+        provenance: null,
+        validationCost: 0.2696465723466803,
+        improvement: 0.5531471532886425,
+        originalSpatialScore: 0.2873281605142487,
+        originalGradientScore: 0.5278399164629114,
+        processedSpatialScore: -0.26581899277439386,
+        processedGradientScore: 0.00637929928714411
+    };
+    const driftedLocalShiftCandidate = {
+        accepted: true,
+        source: 'standard+local+validated',
+        provenance: { localShift: true },
+        validationCost: 0.13556486383737498,
+        improvement: 0.1927215257713466,
+        originalSpatialScore: 0.16967136619110074,
+        originalGradientScore: -0.02446231186883343,
+        processedSpatialScore: -0.023050159580245855,
+        processedGradientScore: 0.06599672931743743
+    };
+
+    const selected = pickBetterCandidate(defaultAnchorCandidate, driftedLocalShiftCandidate, 0.002);
+
+    assert.equal(selected, defaultAnchorCandidate);
+});
+
 test('assessReferenceTextureAlignment should mark a candidate unsafe when it is both darker and flatter than the local reference', () => {
     const width = 96;
     const height = 96;
