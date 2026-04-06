@@ -25,3 +25,4 @@ src/assets/samples/*-fix.*
 .chrome-debug
 .worktrees
 src/assets/samples/fix/
+.omx/

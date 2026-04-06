@@ -428,6 +428,32 @@ test('processWatermarkImageData should avoid conservative fallback on debug1-sou
     );
 });
 
+test('processWatermarkImageData should avoid local-shift drift on debug2-source portrait sample', async () => {
+    const alpha48 = calculateAlphaMap(await decodeImageDataInNode(path.resolve('src/assets/bg_48.png')));
+    const alpha96 = calculateAlphaMap(await decodeImageDataInNode(path.resolve('src/assets/bg_96.png')));
+    const imageData = await decodeImageDataInNode(path.resolve('src/assets/samples/debug2-source.png'));
+
+    const result = processWatermarkImageData(imageData, {
+        alpha48,
+        alpha96,
+        adaptiveMode: 'never',
+        maxPasses: 1,
+        getAlphaMap: (size) => interpolateAlphaMap(alpha96, 96, size)
+    });
+
+    assert.ok(result.meta.applied, `skipReason=${result.meta.skipReason}`);
+    assert.equal(result.meta.source, 'standard', `expected standard anchor to win, got ${result.meta.source}`);
+    assert.deepEqual(
+        result.meta.position,
+        { x: 688, y: 1296, width: 48, height: 48 },
+        `unexpected final position=${JSON.stringify(result.meta.position)}`
+    );
+    assert.ok(
+        result.meta.detection.processedGradientScore < 0.02,
+        `expected debug2-source residual gradient < 0.02, got ${result.meta.detection.processedGradientScore}`
+    );
+});
+
 test('processWatermarkImageData should expose stage timings when debugTimings is enabled', () => {
     const alpha96 = createSyntheticAlphaMap(96);
     const alpha48 = interpolateAlphaMap(alpha96, 96, 48);

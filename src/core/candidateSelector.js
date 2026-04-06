@@ -38,6 +38,9 @@ const STANDARD_LOCAL_SHIFT_STRONG_BASE_SPATIAL_SCORE = 0.8;
 const STANDARD_LOCAL_SHIFT_WEAK_CANDIDATE_GRADIENT_SCORE = 0.12;
 const STANDARD_LOCAL_SHIFT_WEAK_CANDIDATE_SPATIAL_SCORE = 0.65;
 const STANDARD_LOCAL_SHIFT_MIN_VALIDATION_ADVANTAGE = 0.3;
+const STANDARD_LOCAL_SHIFT_SKIP_PROCESSED_GRADIENT_THRESHOLD = 0.02;
+const STANDARD_LOCAL_SHIFT_PRESERVE_CLEAN_BASE_GRADIENT_THRESHOLD = 0.02;
+const STANDARD_LOCAL_SHIFT_MAX_CANDIDATE_GRADIENT_FOR_CLEAN_BASE = 0.03;
 const TEMPLATE_ALIGN_SHIFTS = [-0.5, -0.25, 0, 0.25, 0.5];
 const TEMPLATE_ALIGN_SCALES = [0.99, 1, 1.01];
 const STANDARD_NEARBY_SHIFTS = [-12, -8, -4, 0, 4, 8, 12];
@@ -392,10 +395,51 @@ function shouldPreserveStrongStandardAnchor(currentBest, candidate) {
     const weakCandidateSignal =
         candidateGradient < STANDARD_LOCAL_SHIFT_WEAK_CANDIDATE_GRADIENT_SCORE ||
         candidateSpatial < STANDARD_LOCAL_SHIFT_WEAK_CANDIDATE_SPATIAL_SCORE;
+    const baseProcessedGradientRaw = Number(currentBest.processedGradientScore);
+    const candidateProcessedGradientRaw = Number(candidate.processedGradientScore);
+    const cleanBaseResidual =
+        Number.isFinite(baseProcessedGradientRaw) &&
+        Number.isFinite(candidateProcessedGradientRaw) &&
+        Math.max(0, baseProcessedGradientRaw) <= STANDARD_LOCAL_SHIFT_PRESERVE_CLEAN_BASE_GRADIENT_THRESHOLD &&
+        Math.max(0, candidateProcessedGradientRaw) >= STANDARD_LOCAL_SHIFT_MAX_CANDIDATE_GRADIENT_FOR_CLEAN_BASE;
 
-    return strongBaseSignal &&
+    return (
+        strongBaseSignal &&
         weakCandidateSignal &&
-        validationAdvantage < STANDARD_LOCAL_SHIFT_MIN_VALIDATION_ADVANTAGE;
+        validationAdvantage < STANDARD_LOCAL_SHIFT_MIN_VALIDATION_ADVANTAGE
+    ) || cleanBaseResidual;
+}
+
+function shouldRevertLocalShiftToStandardTrial(selectedCandidate, standardTrial) {
+    if (selectedCandidate?.provenance?.localShift !== true) return false;
+    if (!isStandardCandidateSource(selectedCandidate) || !isStandardCandidateSource(standardTrial)) return false;
+    if (!standardTrial?.accepted) return false;
+
+    const standardOriginalGradient = Math.max(0, Number(standardTrial.originalGradientScore));
+    const standardProcessedGradient = Math.max(0, Number(standardTrial.processedGradientScore));
+    const selectedOriginalGradient = Math.max(0, Number(selectedCandidate.originalGradientScore));
+    const selectedProcessedGradient = Math.max(0, Number(selectedCandidate.processedGradientScore));
+
+    if (
+        !Number.isFinite(standardOriginalGradient) ||
+        !Number.isFinite(standardProcessedGradient) ||
+        !Number.isFinite(selectedOriginalGradient) ||
+        !Number.isFinite(selectedProcessedGradient)
+    ) {
+        return false;
+    }
+
+    return standardOriginalGradient >= STANDARD_LOCAL_SHIFT_STRONG_BASE_GRADIENT_SCORE &&
+        standardProcessedGradient <= STANDARD_LOCAL_SHIFT_PRESERVE_CLEAN_BASE_GRADIENT_THRESHOLD &&
+        selectedOriginalGradient <= STANDARD_LOCAL_SHIFT_WEAK_CANDIDATE_GRADIENT_SCORE &&
+        selectedProcessedGradient >= standardProcessedGradient + 0.03;
+}
+
+function shouldSkipStandardLocalSearch(seedCandidate) {
+    if (!seedCandidate) return false;
+
+    return Math.max(0, Number(seedCandidate.processedGradientScore)) <=
+        STANDARD_LOCAL_SHIFT_SKIP_PROCESSED_GRADIENT_THRESHOLD;
 }
 
 function isPreviewAnchorSearchEligible(originalImageData, config) {
@@ -514,6 +558,7 @@ function searchNearbyStandardCandidate({
 
     let bestCandidate = null;
     for (const seed of candidateSeeds) {
+        if (shouldSkipStandardLocalSearch(seed)) continue;
         for (const dy of STANDARD_NEARBY_SHIFTS) {
             for (const dx of STANDARD_NEARBY_SHIFTS) {
                 if (dx === 0 && dy === 0) continue;
@@ -617,6 +662,7 @@ function searchFineStandardLocalCandidate({
     shiftCandidates = STANDARD_FINE_LOCAL_SHIFTS
 }) {
     if (!seedCandidate?.alphaMap || !seedCandidate?.position) return null;
+    if (shouldSkipStandardLocalSearch(seedCandidate)) return null;
 
     let bestCandidate = null;
     for (const dy of shiftCandidates) {
@@ -1173,6 +1219,11 @@ export function selectInitialCandidate({
             source: `${validatedCandidate.source}+validated`
         };
         baseDecisionTier = 'validated-match';
+    }
+
+    if (shouldRevertLocalShiftToStandardTrial(baseCandidate, standardTrial)) {
+        baseCandidate = standardTrial;
+        baseDecisionTier = hasReliableStandardMatch ? 'direct-match' : 'validated-match';
     }
 
     let selectedTrial = baseCandidate;
