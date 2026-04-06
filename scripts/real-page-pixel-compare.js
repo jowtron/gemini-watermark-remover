@@ -54,6 +54,28 @@ export function collectReadyProcessedImageIndexes(images = []) {
     .map((image) => image.index);
 }
 
+export function resolveComparableBeforeUrl(target = {}) {
+  const candidates = [
+    target?.stableSource,
+    target?.sourceUrl,
+    target?.currentSrc,
+    target?.src
+  ];
+
+  for (const candidate of candidates) {
+    const value = typeof candidate === 'string' ? candidate.trim() : '';
+    if (!value) {
+      continue;
+    }
+    if (value === target?.objectUrl) {
+      continue;
+    }
+    return value;
+  }
+
+  return '';
+}
+
 export function parseRealPagePixelCompareCliArgs(argv = []) {
   const args = [...argv];
   const parsed = {
@@ -105,6 +127,7 @@ async function listCandidateImages(page) {
       height: img.height,
       state: img.dataset?.gwrPageImageState || '',
       stableSource: img.dataset?.gwrStableSource || '',
+      sourceUrl: img.dataset?.gwrSourceUrl || '',
       objectUrl: img.dataset?.gwrWatermarkObjectUrl || '',
       className: img.className || ''
     }));
@@ -136,19 +159,38 @@ async function captureTargetPair(page, domImageIndex) {
       };
     };
 
-    const before = await toPngDataUrl(target.dataset.gwrStableSource);
-    const after = await toPngDataUrl(target.dataset.gwrWatermarkObjectUrl);
+    const targetInfo = {
+      domImageIndex: targetIndex,
+      stableSource: target.dataset.gwrStableSource || '',
+      sourceUrl: target.dataset.gwrSourceUrl || '',
+      objectUrl: target.dataset.gwrWatermarkObjectUrl || '',
+      currentSrc: target.currentSrc || '',
+      src: target.getAttribute('src') || '',
+      naturalWidth: target.naturalWidth,
+      naturalHeight: target.naturalHeight,
+      width: target.width,
+      height: target.height
+    };
+    const beforeUrl = [
+      targetInfo.stableSource,
+      targetInfo.sourceUrl,
+      targetInfo.currentSrc,
+      targetInfo.src
+    ].find((candidate) => {
+      const value = typeof candidate === 'string' ? candidate.trim() : '';
+      return value && value !== targetInfo.objectUrl;
+    }) || '';
+    if (!beforeUrl) {
+      throw new Error(`No comparable before url found for target image ${targetIndex}`);
+    }
+
+    const before = await toPngDataUrl(beforeUrl);
+    const after = await toPngDataUrl(targetInfo.objectUrl);
 
     return {
       target: {
-        domImageIndex: targetIndex,
-        stableSource: target.dataset.gwrStableSource,
-        objectUrl: target.dataset.gwrWatermarkObjectUrl,
-        currentSrc: target.currentSrc || '',
-        naturalWidth: target.naturalWidth,
-        naturalHeight: target.naturalHeight,
-        width: target.width,
-        height: target.height
+        ...targetInfo,
+        beforeUrl
       },
       before,
       after
@@ -242,7 +284,8 @@ export async function runRealPagePixelCompare({
   cdpUrl = DEFAULT_REAL_PAGE_PIXEL_COMPARE_CDP_URL,
   outputRoot = DEFAULT_REAL_PAGE_PIXEL_COMPARE_OUTPUT_ROOT,
   pageUrlPrefix = DEFAULT_REAL_PAGE_PIXEL_COMPARE_PAGE_PREFIX,
-  imageIndex = 0
+  imageIndex = 0,
+  domImageIndex: requestedDomImageIndex = null
 } = {}) {
   const browser = await chromium.connectOverCDP(cdpUrl);
 
@@ -256,7 +299,9 @@ export async function runRealPagePixelCompare({
     }
 
     const images = await listCandidateImages(page);
-    const domImageIndex = findReadyProcessedImageIndex(images, imageIndex);
+    const domImageIndex = Number.isInteger(requestedDomImageIndex)
+      ? requestedDomImageIndex
+      : findReadyProcessedImageIndex(images, imageIndex);
     if (domImageIndex < 0) {
       throw new Error(`No ready processed image found for ordinal ${imageIndex}`);
     }
@@ -286,7 +331,7 @@ export async function runRealPagePixelCompare({
     const alphaMap = interpolateAlphaMap(alpha96, 96, position.width);
 
     const visuals = await captureDerivedVisuals(page, {
-      beforeUrl: captured.target.stableSource,
+      beforeUrl: captured.target.beforeUrl,
       afterUrl: captured.target.objectUrl,
       position
     });
@@ -387,7 +432,8 @@ export async function runRealPagePixelCompareAll({
         cdpUrl,
         outputRoot,
         pageUrlPrefix,
-        imageIndex: ordinal
+        imageIndex: ordinal,
+        domImageIndex: imageIndexes[ordinal]
       });
       results.push(result);
     }

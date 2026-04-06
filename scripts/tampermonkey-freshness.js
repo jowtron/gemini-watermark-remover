@@ -98,11 +98,52 @@ export function shouldFailTampermonkeyFreshnessCheck(freshness = null) {
 }
 
 function findTampermonkeyEditorPage(browser, extensionId) {
-  const pagePrefix = `chrome-extension://${extensionId}/options.html`;
+  const pagePrefix = `chrome-extension://${extensionId}/options.html#nav=`;
+  return browser
+    .contexts()
+    .flatMap((context) => context.pages())
+    .find((page) => page.url().startsWith(pagePrefix) && page.url().includes('+editor')) || null;
+}
+
+function findTampermonkeyInstalledPage(browser, extensionId) {
+  const pagePrefix = `chrome-extension://${extensionId}/options.html#nav=installed`;
   return browser
     .contexts()
     .flatMap((context) => context.pages())
     .find((page) => page.url().startsWith(pagePrefix)) || null;
+}
+
+export async function ensureTampermonkeyEditorPage(browser, extensionId) {
+  const existingEditorPage = findTampermonkeyEditorPage(browser, extensionId);
+  if (existingEditorPage) {
+    return existingEditorPage;
+  }
+
+  const context = browser.contexts()[0];
+  if (!context) {
+    throw new Error('CDP browser does not expose a usable browser context');
+  }
+
+  const page = findTampermonkeyInstalledPage(browser, extensionId) || await context.newPage();
+  await page.goto(`chrome-extension://${extensionId}/options.html#nav=installed`, {
+    waitUntil: 'domcontentloaded',
+    timeout: 30000
+  });
+  await page.waitForTimeout(1500);
+
+  const targetLocator = page.locator('span.clickable', {
+    hasText: 'Gemini NanoBanana 图片水印移除'
+  }).first();
+  if (await targetLocator.count() === 0) {
+    throw new Error('Tampermonkey 已安装脚本列表中未找到 Gemini NanoBanana 图片水印移除');
+  }
+
+  await targetLocator.click();
+  await page.waitForURL(new RegExp(`chrome-extension://${extensionId}/options\\.html#nav=.*\\+editor`), {
+    timeout: 30000
+  });
+  await page.waitForTimeout(1500);
+  return page;
 }
 
 async function collectEditorSourceCandidates(page) {
@@ -132,12 +173,7 @@ export async function runTampermonkeyFreshnessCheck({
   const browser = await chromium.connectOverCDP(cdpUrl);
 
   try {
-    const editorPage = findTampermonkeyEditorPage(browser, extensionId);
-    if (!editorPage) {
-      throw new Error(
-        '未找到已打开的 Tampermonkey 编辑器页面，请先在固定 profile 中打开 Gemini NanoBanana 图片水印移除 的编辑器'
-      );
-    }
+    const editorPage = await ensureTampermonkeyEditorPage(browser, extensionId);
 
     const candidates = await collectEditorSourceCandidates(editorPage);
     const bestCandidate = chooseBestEditorSourceCandidate(candidates);

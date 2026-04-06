@@ -7,7 +7,8 @@ import {
   DEFAULT_REAL_PAGE_PIXEL_COMPARE_OUTPUT_ROOT,
   collectReadyProcessedImageIndexes,
   findReadyProcessedImageIndex,
-  parseRealPagePixelCompareCliArgs
+  parseRealPagePixelCompareCliArgs,
+  resolveComparableBeforeUrl
 } from '../../scripts/real-page-pixel-compare.js';
 
 test('parseRealPagePixelCompareCliArgs should default to fixed CDP endpoint and artifact root', () => {
@@ -63,6 +64,41 @@ test('collectReadyProcessedImageIndexes should return all ready processed image 
   ];
 
   assert.deepEqual(collectReadyProcessedImageIndexes(images), [0, 2, 4]);
+});
+
+test('resolveComparableBeforeUrl should prefer stableSource then sourceUrl and avoid the processed object url', () => {
+  assert.equal(
+    resolveComparableBeforeUrl({
+      stableSource: 'blob:https://gemini.google.com/stable',
+      sourceUrl: 'https://lh3.googleusercontent.com/gg/source=s0-rj',
+      currentSrc: 'blob:https://gemini.google.com/original',
+      src: 'blob:https://gemini.google.com/original',
+      objectUrl: 'blob:https://gemini.google.com/processed'
+    }),
+    'blob:https://gemini.google.com/stable'
+  );
+
+  assert.equal(
+    resolveComparableBeforeUrl({
+      stableSource: '',
+      sourceUrl: 'https://lh3.googleusercontent.com/gg/source=s0-rj',
+      currentSrc: 'blob:https://gemini.google.com/original',
+      src: 'blob:https://gemini.google.com/original',
+      objectUrl: 'blob:https://gemini.google.com/processed'
+    }),
+    'https://lh3.googleusercontent.com/gg/source=s0-rj'
+  );
+
+  assert.equal(
+    resolveComparableBeforeUrl({
+      stableSource: '',
+      sourceUrl: '',
+      currentSrc: 'blob:https://gemini.google.com/processed',
+      src: 'blob:https://gemini.google.com/original',
+      objectUrl: 'blob:https://gemini.google.com/processed'
+    }),
+    'blob:https://gemini.google.com/original'
+  );
 });
 
 test('package.json should expose a real-page pixel compare command', () => {

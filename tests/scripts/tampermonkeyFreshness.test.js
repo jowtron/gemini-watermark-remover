@@ -1,12 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import path from 'node:path';
 
 import {
   DEFAULT_TAMPERMONKEY_FRESHNESS_CDP_URL,
   DEFAULT_TAMPERMONKEY_FRESHNESS_SCRIPT_PATH,
   chooseBestEditorSourceCandidate,
   computeUserscriptFreshness,
+  ensureTampermonkeyEditorPage,
   parseTampermonkeyFreshnessCliArgs,
   shouldFailTampermonkeyFreshnessCheck
 } from '../../scripts/tampermonkey-freshness.js';
@@ -27,7 +29,10 @@ test('parseTampermonkeyFreshnessCliArgs should accept explicit cdp url and scrip
   ]);
 
   assert.equal(parsed.cdpUrl, 'http://127.0.0.1:9333');
-  assert.match(parsed.scriptPath, /tmp\/custom\.user\.js$/);
+  assert.equal(
+    parsed.scriptPath.endsWith(path.normalize('tmp/custom.user.js')),
+    true
+  );
 });
 
 test('chooseBestEditorSourceCandidate should prefer the longest non-empty CodeMirror value', () => {
@@ -81,6 +86,16 @@ test('computeUserscriptFreshness should report stale when installed source misse
 test('shouldFailTampermonkeyFreshnessCheck should fail closed for stale results only', () => {
   assert.equal(shouldFailTampermonkeyFreshnessCheck({ status: 'fresh' }), false);
   assert.equal(shouldFailTampermonkeyFreshnessCheck({ status: 'stale' }), true);
+});
+
+test('tampermonkey freshness script should expose an editor auto-open helper', () => {
+  assert.equal(typeof ensureTampermonkeyEditorPage, 'function');
+});
+
+test('tampermonkey freshness script should only treat +editor pages as editor pages', async () => {
+  const source = readFileSync(new URL('../../scripts/tampermonkey-freshness.js', import.meta.url), 'utf8');
+
+  assert.equal(source.includes("page.url().includes('+editor')"), true);
 });
 
 test('package.json should expose a tampermonkey freshness command', () => {
