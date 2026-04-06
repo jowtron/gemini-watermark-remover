@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import path from 'node:path';
 
 import {
     assessReferenceTextureAlignment,
@@ -7,7 +8,9 @@ import {
     pickBetterCandidate,
     selectInitialCandidate
 } from '../../src/core/candidateSelector.js';
+import { calculateAlphaMap } from '../../src/core/alphaMap.js';
 import { interpolateAlphaMap, warpAlphaMap } from '../../src/core/adaptiveDetector.js';
+import { decodeImageDataInNode } from '../../scripts/sample-benchmark.js';
 import {
     applySyntheticWatermark,
     createPatternImageData,
@@ -542,4 +545,37 @@ test('selectInitialCandidate should keep searching nearby on tall portrait image
         Math.abs(result.position.y - truePosition.y) <= 1,
         `expected y to recover toward ${truePosition.y}, got ${result.position.y}`
     );
+});
+
+test('selectInitialCandidate should keep the canonical anchor for debug2-source when drifted candidates have weaker original evidence', async () => {
+    const alpha48 = calculateAlphaMap(await decodeImageDataInNode(path.resolve('src/assets/bg_48.png')));
+    const alpha96 = calculateAlphaMap(await decodeImageDataInNode(path.resolve('src/assets/bg_96.png')));
+    const originalImageData = await decodeImageDataInNode(path.resolve('src/assets/samples/debug2-source.png'));
+    const config = {
+        logoSize: 48,
+        marginRight: 32,
+        marginBottom: 32
+    };
+    const position = {
+        x: 688,
+        y: 1296,
+        width: 48,
+        height: 48
+    };
+
+    const result = selectInitialCandidate({
+        originalImageData,
+        config,
+        position,
+        alpha48,
+        alpha96,
+        getAlphaMap: (size) => interpolateAlphaMap(alpha96, 96, size),
+        allowAdaptiveSearch: true,
+        alphaGainCandidates: [1.05, 1.12, 1.2, 1.28, 1.36, 1.45, 1.52, 1.6]
+    });
+
+    assert.ok(result.selectedTrial, 'expected a selected standard trial');
+    assert.equal(result.source, 'standard');
+    assert.deepEqual(result.position, position);
+    assert.equal(result.selectedTrial.provenance?.localShift, undefined);
 });
