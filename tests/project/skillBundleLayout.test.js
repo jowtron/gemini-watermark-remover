@@ -2,9 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { access } from 'node:fs/promises';
-import { readdir } from 'node:fs/promises';
+import { readdir, mkdtemp, mkdir, writeFile, cp } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import os from 'node:os';
+import path from 'node:path';
 
 const skillRoot = new URL('../../skills/gemini-watermark-remover/', import.meta.url);
 const repoRoot = new URL('../../', import.meta.url);
@@ -91,8 +93,11 @@ test('skill runtime script should provide a direct executable entrypoint', async
 test('skill runtime script should include Windows PATH fallback shim behavior', async () => {
   const source = await readFile(new URL('scripts/run.mjs', skillRoot), 'utf8');
   assert.match(source, /process\.platform\s*===\s*['"]win32['"]/);
-  assert.match(source, /['"]gwr\.cmd['"]/);
+  assert.match(source, /ComSpec|cmd\.exe/);
   assert.match(source, /['"]gwr['"]/);
+  assert.match(source, /['"]pnpm['"]/);
+  assert.match(source, /['"]dlx['"]/);
+  assert.match(source, /['"]gemini-watermark-remover['"]/);
 });
 
 test('skill docs should explicitly include the remove subcommand shape', async () => {
@@ -138,6 +143,65 @@ test('skill runtime script should run with --help in repository workspace', asyn
     /Usage:\s*gwr\s+remove/i,
     'expected help output to include "Usage: gwr remove"'
   );
+});
+
+test('installed skill runtime should fall back to pnpm dlx when repo-local bin is unavailable', async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'gwr-skill-install-'));
+  const installRoot = path.join(tempDir, '.agents', 'skills', 'gemini-watermark-remover');
+  await mkdir(path.join(tempDir, 'bin'), { recursive: true });
+  await cp(fileURLToPath(skillRoot), installRoot, { recursive: true });
+  const packageSpec = 'test-gemini-watermark-remover-spec';
+
+  if (process.platform === 'win32') {
+    const fakePnpmPath = path.join(tempDir, 'bin', 'pnpm.cmd');
+    const fakePnpmScriptPath = path.join(tempDir, 'bin', 'fake-pnpm.cjs');
+    const repoCliPath = fileURLToPath(new URL('../../bin/gwr.mjs', import.meta.url));
+    await writeFile(
+      fakePnpmScriptPath,
+      `const { spawnSync } = require('node:child_process');\nconst args = process.argv.slice(2);\nif (args[0] === 'dlx') args.shift();\nif (args[0] === '${packageSpec}') args.shift();\nconst result = spawnSync(process.execPath, ['${repoCliPath.replace(/\\/g, '\\\\')}', ...args], { stdio: 'inherit' });\nprocess.exit(result.status ?? 1);\n`,
+      'utf8'
+    );
+    await writeFile(
+      fakePnpmPath,
+      `@echo off\r\nnode "%~dp0fake-pnpm.cjs" %*\r\n`,
+      'utf8'
+    );
+  } else {
+    const fakePnpmPath = path.join(tempDir, 'bin', 'pnpm');
+    const repoCliPath = fileURLToPath(new URL('../../bin/gwr.mjs', import.meta.url));
+    await writeFile(
+      fakePnpmPath,
+      `#!/usr/bin/env sh\nif [ "$1" = "dlx" ]; then shift; fi\nif [ "$1" = "gemini-watermark-remover" ]; then shift; fi\nnode "${repoCliPath}" "$@"\n`,
+      'utf8'
+    );
+  }
+
+  const scriptPath = path.join(installRoot, 'scripts', 'run.mjs');
+  const result = await new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [scriptPath, '--help'], {
+      cwd: tempDir,
+      env: {
+        ...process.env,
+        GWR_SKILL_CLI_SPEC: packageSpec,
+        PATH: `${path.join(tempDir, 'bin')}${path.delimiter}${process.env.PATH || ''}`
+      },
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => {
+      stdout += String(chunk);
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += String(chunk);
+    });
+    child.on('error', reject);
+    child.on('close', (code) => resolve({ code, stdout, stderr }));
+  });
+
+  assert.equal(result.code, 0, `expected installed skill fallback to exit 0\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+  assert.match(`${result.stdout}\n${result.stderr}`, /Usage:\s*gwr\s+remove/i);
 });
 
 test('README (zh) should prioritize section headings for online tool, userscript, Skill, and CLI before SDK', async () => {

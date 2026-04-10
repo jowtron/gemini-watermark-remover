@@ -1,19 +1,62 @@
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { access } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const localBinPath = fileURLToPath(new URL('../../../bin/gwr.mjs', import.meta.url));
+const WINDOWS_SHELL = process.env.ComSpec || 'cmd.exe';
+const DEFAULT_CLI_PACKAGE_SPEC = process.env.GWR_SKILL_CLI_SPEC || 'gemini-watermark-remover';
+
+function quoteWindowsCommandArg(value) {
+  const stringValue = String(value);
+  if (stringValue.length === 0) return '""';
+
+  if (!/[\s"]/u.test(stringValue)) {
+    return stringValue;
+  }
+
+  return `"${stringValue.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/g, '$1$1')}"`;
+}
+
+function buildWindowsCommandLine(command, args) {
+  return [command, ...args].map(quoteWindowsCommandArg).join(' ');
+}
+
+function buildWindowsShellCandidate(command, args) {
+  return {
+    command: WINDOWS_SHELL,
+    commandArgs: ['/d', '/s', '/c', buildWindowsCommandLine(command, args)]
+  };
+}
+
+function hasPathCommand(command) {
+  const lookup = process.platform === 'win32'
+    ? spawnSync('where.exe', [command], { stdio: 'ignore' })
+    : spawnSync('which', [command], { stdio: 'ignore' });
+
+  return lookup.status === 0;
+}
 
 function getPathFallbackCandidates(args) {
   if (process.platform === 'win32') {
-    return [
-      { command: 'gwr.cmd', commandArgs: args },
-      { command: 'gwr', commandArgs: args }
-    ];
+    const candidates = [];
+    if (hasPathCommand('gwr')) {
+      candidates.push(buildWindowsShellCandidate('gwr', args));
+    }
+    if (hasPathCommand('pnpm')) {
+      candidates.push(buildWindowsShellCandidate('pnpm', ['dlx', DEFAULT_CLI_PACKAGE_SPEC, ...args]));
+    }
+    return candidates;
   }
 
-  return [{ command: 'gwr', commandArgs: args }];
+  const candidates = [];
+  if (hasPathCommand('gwr')) {
+    candidates.push({ command: 'gwr', commandArgs: args });
+  }
+  if (hasPathCommand('pnpm')) {
+    candidates.push({ command: 'pnpm', commandArgs: ['dlx', DEFAULT_CLI_PACKAGE_SPEC, ...args] });
+  }
+  return candidates;
 }
 
 async function resolveCliCandidates(args) {
@@ -50,14 +93,14 @@ function spawnOnce(command, commandArgs, options) {
 
 export async function runSkillCli(args, options = {}) {
   const candidates = await resolveCliCandidates(args);
-  let lastEnoentError = null;
+  let lastSpawnError = null;
 
   for (const { command, commandArgs } of candidates) {
     try {
       return await spawnOnce(command, commandArgs, options);
     } catch (error) {
-      if (error && error.code === 'ENOENT') {
-        lastEnoentError = error;
+      if (error && (error.code === 'ENOENT' || error.code === 'EINVAL')) {
+        lastSpawnError = error;
         continue;
       }
 
@@ -65,8 +108,8 @@ export async function runSkillCli(args, options = {}) {
     }
   }
 
-  if (lastEnoentError) {
-    throw lastEnoentError;
+  if (lastSpawnError) {
+    throw lastSpawnError;
   }
 
   throw new Error('Unable to locate gwr CLI executable');
