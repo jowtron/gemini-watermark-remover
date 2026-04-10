@@ -93,6 +93,13 @@
 面向使用 AI 编程 agent 的开发者：
 
 - `skills/gemini-watermark-remover/` 包含打包好的 Skill，AI agent 可自动发现并调用。
+- 用 `skills.sh` 安装可执行：
+
+```bash
+pnpm dlx skills add GargantuaX/gemini-watermark-remover --skill gemini-watermark-remover
+```
+
+- 只有在你的本地环境确实需要时，再额外加上 `--agent`、`--yes`、`--copy` 这类参数。
 - 用法：
 
 ```bash

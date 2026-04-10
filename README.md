@@ -93,6 +93,13 @@ Current userscript boundaries:
 For workflows that involve AI coding agents:
 
 - `skills/gemini-watermark-remover/` contains a packaged Skill that agents can discover and invoke.
+- Install it with `skills.sh` using:
+
+```bash
+pnpm dlx skills add GargantuaX/gemini-watermark-remover --skill gemini-watermark-remover
+```
+
+- Add flags like `--agent`, `--yes`, or `--copy` only if your local setup needs them.
 - Usage:
 
 ```bash
