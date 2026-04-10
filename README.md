@@ -18,12 +18,11 @@ An open-source tool to **remove Gemini watermarks** from AI-generated images wit
 
 ## Features
 
-- ✅ **Local Processing Across Entry Points** - Online tool and userscript process images locally in-browser; Skill/CLI workflows run locally in your own environment.
-- ✅ **Privacy-First** - Images are not uploaded to our servers for processing.
+- ✅ **100% Local Processing** - All image processing happens locally in your browser or on your machine. Nothing is uploaded.
 - ✅ **Mathematical Precision** - Based on the Reverse Alpha Blending formula, not "hallucinating" AI models.
-- ✅ **Auto-Detection** - Uses the Gemini size catalog plus local anchor search and interpolated alpha maps for non-standard variants.
-- ✅ **Multiple Access Paths** - Online tool, userscript, Skill, and CLI cover consumer, agent, and automation workflows.
-- ✅ **Cross-Platform** - Supports modern browsers and Node.js-based local automation setups.
+- ✅ **Auto-Detection** - Automatically identifies watermark size and position using Gemini's known output catalog and local anchor search.
+- ✅ **Flexible Usage** - Online tool for quick use, userscript for seamless Gemini page integration, CLI and Skill for scripting and automation.
+- ✅ **Cross-Platform** - Works in modern browsers (Chrome, Firefox, Safari, Edge) and Node.js environments.
 
 ## Gemini Watermark Removal Examples
 
@@ -91,17 +90,26 @@ Current userscript boundaries:
 
 ### Skill
 
-For agent users who want a higher-level workflow:
+For workflows that involve AI coding agents:
 
-- Use the published `gemini-watermark-remover` Skill as the agent-facing entrypoint.
-- The Skill delegates execution to the `gwr` CLI under the hood, so it stays stable for automation while keeping prompts simple.
-- Use this when you want agent-native file processing without exposing low-level CLI details in every prompt.
+- `skills/gemini-watermark-remover/` contains a packaged Skill that agents can discover and invoke.
+- Usage:
+
+```bash
+node skills/gemini-watermark-remover/scripts/run.mjs remove <input> --output <file>
+```
+
+- See [`SKILL.md`](skills/gemini-watermark-remover/SKILL.md) for agent integration details.
 
 ### CLI
 
 For scripting, CI, and local batch workflows, use the direct CLI:
 
 ```bash
+# repo-local
+node bin/gwr.mjs remove <input> --output <file>
+
+# installed globally
 gwr remove <input> [--output <file> | --out-dir <dir>] [--overwrite] [--json]
 ```
 
@@ -212,6 +220,30 @@ const result = await removeWatermarkFromBuffer(inputBuffer, {
 });
 ```
 
+## Runtime Requirements
+
+### Web And Userscript
+
+- modern Chrome / Firefox / Safari / Edge class browser
+- ES modules
+- Canvas API
+- Async/Await
+- TypedArray (`Float32Array`, `Uint8ClampedArray`)
+- for the website copy button: `navigator.clipboard.write(...)` and `ClipboardItem`
+
+### CLI And Skill
+
+- a local Node.js runtime capable of running this package and its dependencies
+- filesystem access for local input/output paths
+- for repo-local usage:
+
+```bash
+node bin/gwr.mjs remove <input> --output <file>
+node skills/gemini-watermark-remover/scripts/run.mjs remove <input> --output <file>
+```
+
+- for distributed Skill usage, the local environment must be able to execute the packaged `gwr` CLI boundary
+
 ## Testing
 
 ```bash
@@ -253,96 +285,57 @@ By capturing the watermark on a known solid background, we reconstruct the exact
 
 ## Detection Rules
 
-The engine no longer relies on a single coarse `48/96 + 32/64` heuristic.
+The engine uses layered detection to locate and verify watermarks:
 
-Current detection is layered:
+1. **Size catalog lookup** — matches image dimensions against Gemini's known output sizes to predict watermark size and position.
+2. **Local anchor search** — refines the predicted position by scanning pixel data around the expected watermark region.
+3. **Restoration validation** — confirms the detected watermark is real before applying removal, avoiding false positives.
 
-- Use an official Gemini size catalog as the primary prior for anchor selection
-- Project near-official exports back onto the closest documented size family
-- Search locally around both default anchors and catalog-derived anchors
-- Accept removal only after restoration validation confirms suppression is real
+Default watermark configurations:
 
-The fallback default configs are still:
-
-| Default Condition | Watermark Size | Right Margin | Bottom Margin |
+| Condition | Watermark Size | Right Margin | Bottom Margin |
 | :--- | :--- | :--- | :--- |
-| large documented / inferred outputs | 96×96 | 64px | 64px |
-| smaller documented / inferred outputs | 48×48 | 32px | 32px |
+| Larger Gemini outputs | 96×96 | 64px | 64px |
+| Smaller Gemini outputs | 48×48 | 32px | 32px |
 
 ## Project Structure
 
 ```text
 gemini-watermark-remover/
+├── bin/                   # Published CLI entrypoint (`gwr`)
 ├── public/
-│   ├── index.html         # Main page
-│   └── terms.html         # Terms of Service page
+│   ├── index.html         # Main web experience
+│   ├── terms.html         # Terms of service page
+│   └── tampermonkey-worker-probe.*  # Probe pages for userscript/debug flows
+├── skills/
+│   └── gemini-watermark-remover/    # Distributable agent skill bundle
 ├── src/
-│   ├── core/
-│   │   ├── alphaMap.js    # Alpha map calculation logic
-│   │   ├── blendModes.js  # Implementation of Reverse Alpha Blending
-│   │   └── watermarkEngine.js  # Main engine coordinator
-│   ├── assets/
-│   │   ├── bg_48.png      # Pre-captured 48×48 watermark map
-│   │   └── bg_96.png      # Pre-captured 96×96 watermark map
-│   ├── i18n/              # Internationalization language files
-│   ├── userscript/        # Userscript for Gemini
+│   ├── assets/            # Calibration assets and regression samples
+│   ├── cli/               # CLI argument parsing and file workflows
+│   ├── core/              # Watermark math, scoring, and restoration
+│   ├── i18n/              # Web locale resources
+│   ├── page/              # Page-side runtime for Gemini page integration
+│   ├── sdk/               # Advanced/internal SDK surface
+│   ├── shared/            # Shared DOM, blob, and session helpers
+│   ├── userscript/        # Userscript entrypoints and browser hooks
+│   ├── workers/           # Worker runtime
 │   ├── app.js             # Website application entry point
 │   └── i18n.js            # Internationalization utilities
+├── tests/                 # Unit, regression, packaging, and smoke tests
+├── scripts/               # Local automation and debug launchers
 ├── dist/                  # Build output directory
 ├── wrangler.toml          # Cloudflare Worker/assets deployment config
-├── scripts/               # Local automation and debug launchers
 ├── build.js               # Build script
 └── package.json
 ```
 
-## Core Modules
+## Architecture Overview
 
-### alphaMap.js
-
-Calculates the Alpha channel by comparing captured watermark assets:
-
-```javascript
-export function calculateAlphaMap(bgCaptureImageData) {
-    // Extract max RGB channel and normalize to [0, 1]
-    const alphaMap = new Float32Array(width * height);
-    for (let i = 0; i < alphaMap.length; i++) {
-        const maxChannel = Math.max(r, g, b);
-        alphaMap[i] = maxChannel / 255.0;
-    }
-    return alphaMap;
-}
-```
-
-### blendModes.js
-
-The mathematical core of the tool:
-
-```javascript
-export function removeWatermark(imageData, alphaMap, position) {
-    // Formula: original = (watermarked - α × 255) / (1 - α)
-    for (let row = 0; row < height; row++) {
-        for (let col = 0; col < width; col++) {
-            const alpha = Math.min(alphaMap[idx], MAX_ALPHA);
-            const original = (watermarked - alpha * 255) / (1.0 - alpha);
-            imageData.data[idx] = Math.max(0, Math.min(255, original));
-        }
-    }
-}
-```
-
-## Browser Compatibility
-
-- ✅ Chrome 90+
-- ✅ Firefox 88+
-- ✅ Safari 14+
-- ✅ Edge 90+
-
-Required APIs:
-- ES6 Modules
-- Canvas API
-- Async/Await
-- TypedArray (Float32Array, Uint8ClampedArray)
-- for the website's copy button: `navigator.clipboard.write(...)` and `ClipboardItem`
+- `src/core/` contains watermark detection, candidate selection, restoration metrics, and the reverse-alpha removal pipeline.
+- `src/userscript/`, `src/page/`, and `src/shared/` implement the real Gemini page integration, including preview replacement plus copy/download interception.
+- `src/cli/` and `bin/gwr.mjs` expose file-oriented local automation.
+- `skills/gemini-watermark-remover/` provides a distributable Skill that stays on the CLI boundary instead of importing repository internals directly.
+- `src/sdk/` remains available for advanced/internal integrations, but it is no longer the primary public entrypoint.
 
 ---
 

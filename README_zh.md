@@ -18,12 +18,11 @@
 
 ## 特性
 
-- ✅ **多入口本地处理** - 在线工具与油猴脚本在浏览器本地处理；Skill/CLI 在你的本地环境执行处理流程
-- ✅ **隐私保护** - 图片处理不上传到我们的服务器
-- ✅ **数学精确** - 基于反向 Alpha 混合算法，非 AI 模型
-- ✅ **自动检测** - 结合 Gemini 官方尺寸目录、局部锚点搜索，以及对非标准尺寸的插值 alpha map 处理
-- ✅ **多种使用入口** - 在线工具、油猴脚本、Skill、CLI 覆盖普通用户、agent 和自动化场景
-- ✅ **跨平台** - 支持现代浏览器与基于 Node.js 的本地自动化环境
+- ✅ **100% 本地处理** - 所有图片处理都在你的浏览器或本地环境中完成，不会上传到任何服务器
+- ✅ **数学精确** - 基于反向 Alpha 混合算法，而非 AI 修复模型
+- ✅ **自动检测** - 基于 Gemini 已知输出尺寸目录和局部锚点搜索，自动识别水印大小与位置
+- ✅ **灵活使用** - 在线工具快速上手、油猴脚本无缝集成 Gemini 页面、CLI 和 Skill 支持脚本化与自动化
+- ✅ **跨平台** - 支持现代浏览器（Chrome、Firefox、Safari、Edge）和 Node.js 环境
 
 ## Gemini 去水印效果示例
 
@@ -91,17 +90,26 @@
 
 ### Skill
 
-面向 agent 用户的推荐方式：
+面向使用 AI 编程 agent 的开发者：
 
-- 使用发布的 `gemini-watermark-remover` Skill 作为 agent 入口。
-- Skill 底层依赖 `gwr` CLI 执行去水印任务，但会把常用流程封装成更稳定的指令形态。
-- 适合希望通过 agent 处理本地文件、又不想每次都手写底层 CLI 参数的场景。
+- `skills/gemini-watermark-remover/` 包含打包好的 Skill，AI agent 可自动发现并调用。
+- 用法：
+
+```bash
+node skills/gemini-watermark-remover/scripts/run.mjs remove <input> --output <file>
+```
+
+- 详见 [`SKILL.md`](skills/gemini-watermark-remover/SKILL.md)。
 
 ### CLI
 
 面向脚本化、CI、批量处理等自动化场景，可直接调用 CLI：
 
 ```bash
+# 仓库内直接运行
+node bin/gwr.mjs remove <input> --output <file>
+
+# 全局安装后使用
 gwr remove <input> [--output <file> | --out-dir <dir>] [--overwrite] [--json]
 ```
 
@@ -212,6 +220,47 @@ const result = await removeWatermarkFromBuffer(inputBuffer, {
 });
 ```
 
+## 运行要求
+
+### 网页与油猴脚本
+
+- 现代 Chrome / Firefox / Safari / Edge 浏览器
+- ES Modules
+- Canvas API
+- Async/Await
+- TypedArray（`Float32Array`、`Uint8ClampedArray`）
+- 如果要使用网页上的“复制结果”按钮，还需要 `navigator.clipboard.write(...)` 和 `ClipboardItem`
+
+### CLI 与 Skill
+
+- 能运行本包及其依赖的本地 Node.js 环境
+- 可读写本地输入/输出路径的文件系统环境
+- 在仓库内可直接使用：
+
+```bash
+node bin/gwr.mjs remove <input> --output <file>
+node skills/gemini-watermark-remover/scripts/run.mjs remove <input> --output <file>
+```
+
+- 分发后的 Skill 则依赖本地环境能够执行打包后的 `gwr` CLI 边界
+
+## 测试
+
+```bash
+# 运行全部测试
+pnpm test
+```
+
+回归测试会使用 `src/assets/samples/` 下的源样本。
+源样本文件应保留在 git 中。
+这些样本的命名与保留规则见 `src/assets/samples/README.md`。
+复杂图预览/下载验证说明见 `docs/complex-figure-verification-checklist.md`。
+本地生成到 `src/assets/samples/fix/` 下的文件只是人工回归快照，不进入 git，也不作为 CI 必须存在的基线。
+
+## 发版说明
+
+版本变更请看 [CHANGELOG_zh.md](CHANGELOG_zh.md)，本地发版清单见 [RELEASE_zh.md](RELEASE_zh.md)。
+
 ## Gemini 水印去除算法原理
 
 ### Gemini 添加水印的方式
@@ -236,133 +285,57 @@ $$original = \frac{watermarked - \alpha \cdot logo}{1 - \alpha}$$
 
 ## 水印检测规则
 
-现在的检测已经不再只是“48/96 + 32/64”的粗粒度 if/else 规则。
+引擎使用分层检测来定位和验证水印：
 
-当前策略分层如下：
+1. **尺寸目录匹配** — 将图片尺寸与 Gemini 已知输出尺寸对比，预测水印大小和位置。
+2. **局部锚点搜索** — 在预测的水印区域周围扫描实际像素数据，精确定位水印位置。
+3. **恢复验证** — 在应用去水印前确认检测到的水印是真实的，避免误判。
 
-- 先使用 Gemini 官方尺寸目录作为主要锚点先验
-- 对接近官方尺寸的导出图，按最近的官方尺寸族反推锚点
-- 围绕默认锚点和目录锚点一起做局部搜索
-- 只有在 restoration validation 确认压制真实发生后，才接受去水印结果
+默认水印配置：
 
-默认回退配置仍然是：
-
-| 默认条件 | 水印尺寸 | 右边距 | 下边距 |
+| 条件 | 水印尺寸 | 右边距 | 下边距 |
 |------------|---------|--------|--------|
-| 较大的官方或推断尺寸 | 96×96 | 64px | 64px |
-| 较小的官方或推断尺寸 | 48×48 | 32px | 32px |
-
-## 测试
-
-```bash
-# 运行全部测试
-pnpm test
-```
-
-回归测试会使用 `src/assets/samples/` 下的源样本。
-源样本文件应保留在 git 中。
-这些样本的命名与保留规则见 `src/assets/samples/README.md`。
-复杂图预览/下载验证说明见 `docs/complex-figure-verification-checklist.md`。
-本地生成到 `src/assets/samples/fix/` 下的文件只是人工回归快照，不进入 git，也不作为 CI 必须存在的基线。
-
-## 发版说明
-
-版本变更请看 [CHANGELOG_zh.md](CHANGELOG_zh.md)，本地发版清单见 [RELEASE_zh.md](RELEASE_zh.md)。
+| 较大的 Gemini 输出 | 96×96 | 64px | 64px |
+| 较小的 Gemini 输出 | 48×48 | 32px | 32px |
 
 ## 项目结构
 
 ```
 gemini-watermark-remover/
+├── bin/                   # 发布后的 CLI 入口（`gwr`）
 ├── public/
-│   ├── index.html         # 主页面
-│   └── terms.html         # 使用条款页面
+│   ├── index.html         # 主网页体验
+│   ├── terms.html         # 使用条款页面
+│   └── tampermonkey-worker-probe.*  # userscript / worker 调试探针页
+├── skills/
+│   └── gemini-watermark-remover/    # 可分发的 agent Skill bundle
 ├── src/
-│   ├── core/
-│   │   ├── alphaMap.js    # Alpha map 计算
-│   │   ├── blendModes.js  # 反向 alpha 混合算法
-│   │   └── watermarkEngine.js  # 主引擎
-│   ├── assets/
-│   │   ├── bg_48.png      # 48×48 水印背景
-│   │   └── bg_96.png      # 96×96 水印背景
-│   ├── i18n/              # 国际化语言文件
-│   ├── userscript/        # 用户脚本
+│   ├── assets/            # 校准资源与回归样本
+│   ├── cli/               # CLI 参数解析与文件工作流
+│   ├── core/              # 去水印核心算法、评分与恢复逻辑
+│   ├── i18n/              # 网页国际化资源
+│   ├── page/              # Gemini 页面侧运行时
+│   ├── sdk/               # 高级 / 内部 SDK 接口
+│   ├── shared/            # DOM、blob、session 等共享辅助模块
+│   ├── userscript/        # userscript 入口与浏览器钩子
+│   ├── workers/           # worker 运行时
 │   ├── app.js             # 网站应用入口
 │   └── i18n.js            # 国际化工具
+├── tests/                 # 单元、回归、打包与 smoke 测试
+├── scripts/               # 本地自动化与调试启动脚本
 ├── dist/                  # 构建输出目录
 ├── wrangler.toml          # Cloudflare Worker/静态资产部署配置
-├── scripts/               # 本地自动化与调试启动脚本
 ├── build.js               # 构建脚本
 └── package.json
 ```
 
-## 核心模块
+## 架构概览
 
-### alphaMap.js
-
-从背景捕获图像计算 Alpha 通道：
-
-```javascript
-export function calculateAlphaMap(bgCaptureImageData) {
-    // 提取 RGB 通道最大值并归一化到 [0, 1]
-    const alphaMap = new Float32Array(width * height);
-    for (let i = 0; i < alphaMap.length; i++) {
-        const maxChannel = Math.max(r, g, b);
-        alphaMap[i] = maxChannel / 255.0;
-    }
-    return alphaMap;
-}
-```
-
-### blendModes.js
-
-实现反向 Alpha 混合算法：
-
-```javascript
-export function removeWatermark(imageData, alphaMap, position) {
-    // 对每个像素应用公式：original = (watermarked - α × 255) / (1 - α)
-    for (let row = 0; row < height; row++) {
-        for (let col = 0; col < width; col++) {
-            const alpha = Math.min(alphaMap[idx], MAX_ALPHA);
-            const original = (watermarked - alpha * 255) / (1.0 - alpha);
-            imageData.data[idx] = Math.max(0, Math.min(255, original));
-        }
-    }
-}
-```
-
-### watermarkEngine.js
-
-主引擎类，协调整个处理流程：
-
-```javascript
-export class WatermarkEngine {
-    async removeWatermarkFromImage(image) {
-        const alpha48 = await this.getAlphaMap(48);
-        const alpha96 = await this.getAlphaMap(96);
-        const result = processWatermarkImageData(imageData, {
-            alpha48,
-            alpha96,
-            adaptiveMode: 'auto'
-        });
-        ctx.putImageData(result.imageData, 0, 0);
-        return canvas;
-    }
-}
-```
-
-## 浏览器兼容性
-
-- ✅ Chrome 90+
-- ✅ Firefox 88+
-- ✅ Safari 14+
-- ✅ Edge 90+
-
-需要支持：
-- ES6 Modules
-- Canvas API
-- Async/Await
-- TypedArray (Float32Array, Uint8ClampedArray)
-- 如果要使用网页上的“复制结果”按钮，还需要 `navigator.clipboard.write(...)` 和 `ClipboardItem`
+- `src/core/` 负责水印检测、候选位置选择、恢复评分和反向 alpha 去水印主流程。
+- `src/userscript/`、`src/page/`、`src/shared/` 共同实现真实 Gemini 页面上的预览替换、复制/下载拦截等集成功能。
+- `src/cli/` 与 `bin/gwr.mjs` 提供面向文件的本地自动化入口。
+- `skills/gemini-watermark-remover/` 提供可分发的 Skill bundle，并且严格停留在 CLI 边界，不直接导入仓库内部实现。
+- `src/sdk/` 仍保留给高级 / 内部集成使用，但不再是对外主入口。
 
 ---
 
