@@ -3,6 +3,7 @@ import { removeRepeatedWatermarkLayers } from './multiPassRemoval.js';
 import {
     computeRegionGradientCorrelation,
     computeRegionSpatialCorrelation,
+    interpolateAlphaMap,
     warpAlphaMap
 } from './adaptiveDetector.js';
 import {
@@ -567,6 +568,11 @@ export function processWatermarkImageData(imageData, options = {}) {
     let source = 'standard';
     let adaptiveConfidence = null;
     let alphaGain = 1;
+
+    // Manual overrides from advanced settings
+    const forceAlphaGain = Number.isFinite(options.forceAlphaGain) && options.forceAlphaGain > 0
+        ? options.forceAlphaGain : null;
+    const forcePosition = options.forcePosition || null;
     let subpixelShift = null;
     let templateWarp = null;
     let decisionTier = null;
@@ -574,6 +580,67 @@ export function processWatermarkImageData(imageData, options = {}) {
     let attemptedPassCount = 0;
     let passStopReason = null;
     let passes = null;
+
+    // If forcePosition is set, override the detected position and apply removal directly
+    if (forcePosition) {
+        position = {
+            x: forcePosition.x,
+            y: forcePosition.y,
+            width: forcePosition.width,
+            height: forcePosition.height
+        };
+        // Pick closest alpha map size
+        const forceSize = forcePosition.width;
+        if (forceSize !== 48 && forceSize !== 96) {
+            alphaMap = options.getAlphaMap
+                ? options.getAlphaMap(forceSize)
+                : interpolateAlphaMap(alpha96, 96, forceSize);
+        } else {
+            alphaMap = forceSize === 96 ? alpha96 : alpha48;
+        }
+        source = 'manual-region';
+        decisionTier = 'manual';
+        alphaGain = forceAlphaGain || 1;
+
+        const forceImageData = cloneImageData(originalImageData);
+        removeWatermark(forceImageData, alphaMap, position, { alphaGain });
+
+        if (debugTimingsEnabled) {
+            debugTimings.totalMs = nowMs() - totalStartedAt;
+        }
+
+        const forceSpatialScore = computeRegionSpatialCorrelation({
+            imageData: forceImageData,
+            alphaMap,
+            region: { x: position.x, y: position.y, size: position.width }
+        });
+        const forceGradientScore = computeRegionGradientCorrelation({
+            imageData: forceImageData,
+            alphaMap,
+            region: { x: position.x, y: position.y, size: position.width }
+        });
+
+        return {
+            imageData: forceImageData,
+            meta: createWatermarkMeta({
+                position,
+                config: { logoSize: forceSize, marginRight: 0, marginBottom: 0 },
+                originalSpatialScore: 0,
+                originalGradientScore: 0,
+                processedSpatialScore: forceSpatialScore,
+                processedGradientScore: forceGradientScore,
+                suppressionGain: 0,
+                alphaGain,
+                passCount: 1,
+                attemptedPassCount: 1,
+                passStopReason: 'manual-region',
+                source: 'manual-region',
+                decisionTier: 'manual',
+                applied: true
+            }),
+            debugTimings
+        };
+    }
 
     const initialSelectionStartedAt = nowMs();
     const initialSelection = selectInitialCandidate({
@@ -623,11 +690,23 @@ export function processWatermarkImageData(imageData, options = {}) {
     alphaGain = initialSelection.alphaGain;
     decisionTier = initialSelection.decisionTier;
 
+    // Apply forced alpha gain override (skip auto-calibration later)
+    if (forceAlphaGain) {
+        alphaGain = forceAlphaGain;
+    }
+
     const selectedTrial = initialSelection.selectedTrial;
     const usePreviewAnchorFastCleanup = shouldUsePreviewAnchorFastCleanup(selectedTrial, position);
     const skipPreviewAnchorMultiPass = selectedTrial?.provenance?.previewAnchor === true;
 
-    let finalImageData = selectedTrial.imageData;
+    // If forceAlphaGain, redo the first pass with the forced gain
+    let finalImageData;
+    if (forceAlphaGain) {
+        finalImageData = cloneImageData(originalImageData);
+        removeWatermark(finalImageData, alphaMap, position, { alphaGain: forceAlphaGain });
+    } else {
+        finalImageData = selectedTrial.imageData;
+    }
 
     let originalSpatialScore = selectedTrial.originalSpatialScore;
     let originalGradientScore = selectedTrial.originalGradientScore;
@@ -725,7 +804,7 @@ export function processWatermarkImageData(imageData, options = {}) {
     let suppressionGain = originalSpatialScore - finalProcessedSpatialScore;
 
     const recalibrationStartedAt = nowMs();
-    if (shouldRecalibrateAlphaStrength({
+    if (!forceAlphaGain && shouldRecalibrateAlphaStrength({
         originalScore: originalSpatialScore,
         processedScore: finalProcessedSpatialScore,
         suppressionGain

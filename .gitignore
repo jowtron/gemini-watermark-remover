@@ -1,29 +1,28 @@
-# dependencies
-node_modules
 
-# misc
+.agents
+.artifacts
+.chrome-debug
 .DS_Store
+.env
+.env*.local
 .history
-
+.npm-cache-local
+.npm-tmp-cache
+.omx/
+.tmp-*.png
+.worktrees
 # build
-dist/
-
 # debug
+# dependencies
+# local env files
+# misc
+dist/
+docs/superpowers/.wrangler/
+node_modules
 npm-debug.log*
+src/assets/samples/*-fix.*
+src/assets/samples/fix/
 yarn-debug.log*
 yarn-error.log*
 
-# local env files
-.env*.local
-.env
-.artifacts
-.agents
-.npm-cache-local
-.npm-tmp-cache
-src/assets/samples/*-fix.*
-.tmp-*.png
-.chrome-debug
-.worktrees
-src/assets/samples/fix/
-.omx/
-docs/superpowers/
+.wrangler/

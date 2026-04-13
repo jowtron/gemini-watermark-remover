@@ -25,6 +25,9 @@ let workerClient = null;
 let imageQueue = [];
 let processedCount = 0;
 let zoom = null;
+let currentItem = null;
+let customRegion = null; // {x, y, width, height} in image coordinates
+let regionSelectionActive = false;
 
 // dom elements references
 const uploadArea = document.getElementById('uploadArea');
@@ -41,6 +44,25 @@ const processedInfo = document.getElementById('processedInfo');
 const downloadBtn = document.getElementById('downloadBtn');
 const copyBtn = document.getElementById('copyBtn');
 const resetBtn = document.getElementById('resetBtn');
+
+// Advanced settings DOM
+const advancedToggle = document.getElementById('advancedToggle');
+const advancedPanel = document.getElementById('advancedPanel');
+const advancedChevron = document.getElementById('advancedChevron');
+const alphaGainSlider = document.getElementById('alphaGainSlider');
+const alphaGainValue = document.getElementById('alphaGainValue');
+const maxPassesSlider = document.getElementById('maxPassesSlider');
+const maxPassesValue = document.getElementById('maxPassesValue');
+const adaptiveModeSelect = document.getElementById('adaptiveModeSelect');
+const regionSelectBtn = document.getElementById('regionSelectBtn');
+const regionClearBtn = document.getElementById('regionClearBtn');
+const regionInfo = document.getElementById('regionInfo');
+const regionOverlay = document.getElementById('regionOverlay');
+const regionBox = document.getElementById('regionBox');
+const reprocessBtn = document.getElementById('reprocessBtn');
+const resetAdvancedBtn = document.getElementById('resetAdvancedBtn');
+const detectionInfo = document.getElementById('detectionInfo');
+const detectionDetails = document.getElementById('detectionDetails');
 
 async function getEngine() {
     if (!enginePromise) {
@@ -100,6 +122,7 @@ async function init() {
         hideLoading();
         setupEventListeners();
         setupSlider();
+        setupAdvancedPanel();
 
         zoom = mediumZoom('[data-zoomable]', {
             margin: 24,
@@ -179,9 +202,16 @@ function reset() {
     multiPreview.style.display = 'none';
     imageQueue = [];
     processedCount = 0;
+    currentItem = null;
+    customRegion = null;
     fileInput.value = '';
     copyBtn.style.display = 'none';
     downloadBtn.style.display = 'none';
+    reprocessBtn.classList.add('hidden');
+    detectionInfo.classList.add('hidden');
+    regionBox.classList.remove('visible');
+    regionClearBtn.classList.add('hidden');
+    regionInfo.classList.add('hidden');
     setStatusMessage('');
     uploadArea.scrollIntoView({ behavior: 'smooth', block: 'center' });
 }
@@ -310,19 +340,24 @@ function renderImageCardStatus(item) {
     updateStatus(item.id, html, true);
 }
 
-async function processSingle(item) {
+async function processSingle(item, options = {}) {
     try {
-        const img = await loadImage(item.file);
-        item.originalImg = img;
+        currentItem = item;
+        let img = item.originalImg;
+        if (!img) {
+            img = await loadImage(item.file);
+            item.originalImg = img;
+        }
 
         originalImage.src = img.src;
         renderSingleImageMeta(item);
 
-        const processed = await processImageWithBestPath(item.file, img);
+        const processed = await processImageWithBestPath(item.file, img, options);
         item.processedMeta = processed.meta;
         renderSingleImageMeta(item);
         item.processedBlob = processed.blob;
 
+        if (item.processedUrl) URL.revokeObjectURL(item.processedUrl);
         item.processedUrl = URL.createObjectURL(processed.blob);
         processedImage.src = item.processedUrl;
         const overlay = document.getElementById('processedOverlay');
@@ -337,12 +372,230 @@ async function processSingle(item) {
         downloadBtn.style.display = 'flex';
         downloadBtn.onclick = () => downloadImage(item);
 
-        renderSingleProcessedMeta(item);
+        reprocessBtn.classList.remove('hidden');
 
-        document.getElementById('comparisonContainer').scrollIntoView({ behavior: 'smooth', block: 'start' });
+        renderSingleProcessedMeta(item);
+        renderDetectionInfo(item);
+
+        if (!options.skipScroll) {
+            document.getElementById('comparisonContainer').scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
     } catch (error) {
         console.error(error);
+        setStatusMessage(error.message || 'Processing failed', 'warn');
     }
+}
+
+function renderDetectionInfo(item) {
+    if (!item?.processedMeta) {
+        detectionInfo.classList.add('hidden');
+        return;
+    }
+    const meta = item.processedMeta;
+    const det = meta.detection || {};
+    const fmt = (v) => (v == null ? '—' : (typeof v === 'number' ? v.toFixed(3) : String(v)));
+    const rows = [
+        [i18n.t('advanced.detection.source'), meta.source || '—'],
+        [i18n.t('advanced.detection.tier'), meta.decisionTier || '—'],
+        [i18n.t('advanced.detection.confidence'), fmt(det.adaptiveConfidence)],
+        [i18n.t('advanced.detection.gain'), fmt(meta.alphaGain)],
+        [i18n.t('advanced.detection.passes'), `${meta.passCount ?? '—'} / ${meta.attemptedPassCount ?? '—'}`],
+        [i18n.t('advanced.detection.suppression'), fmt(det.suppressionGain)]
+    ];
+    detectionDetails.innerHTML = rows.map(([k, v]) =>
+        `<div class="flex justify-between gap-2"><span class="text-gray-500 dark:text-gray-500">${k}</span><span class="text-gray-700 dark:text-gray-200">${v}</span></div>`
+    ).join('');
+    detectionInfo.classList.remove('hidden');
+}
+
+function getCurrentAdvancedOptions() {
+    const options = {};
+    const gain = Number(alphaGainSlider.value);
+    if (gain > 0) options.forceAlphaGain = gain;
+
+    const maxPasses = Number(maxPassesSlider.value);
+    if (Number.isFinite(maxPasses) && maxPasses !== 4) options.maxPasses = maxPasses;
+
+    const mode = adaptiveModeSelect.value;
+    if (mode && mode !== 'auto') options.adaptiveMode = mode;
+
+    if (customRegion) options.forcePosition = customRegion;
+    return options;
+}
+
+function setupAdvancedPanel() {
+    // Set localized tooltip
+    resetAdvancedBtn.title = i18n.t('advanced.resetDefaults');
+
+    // Collapse/expand
+    advancedToggle.addEventListener('click', () => {
+        const isHidden = advancedPanel.classList.toggle('hidden');
+        advancedChevron.style.transform = isHidden ? '' : 'rotate(180deg)';
+    });
+
+    // Alpha gain slider
+    alphaGainSlider.addEventListener('input', () => {
+        const v = Number(alphaGainSlider.value);
+        alphaGainValue.textContent = v > 0 ? v.toFixed(2) : i18n.t('advanced.alphaGain.auto');
+    });
+
+    // Max passes slider
+    maxPassesSlider.addEventListener('input', () => {
+        maxPassesValue.textContent = maxPassesSlider.value;
+    });
+
+    // Reset advanced settings to defaults
+    resetAdvancedBtn.addEventListener('click', () => {
+        alphaGainSlider.value = 0;
+        alphaGainValue.textContent = i18n.t('advanced.alphaGain.auto');
+        maxPassesSlider.value = 4;
+        maxPassesValue.textContent = '4';
+        adaptiveModeSelect.value = 'auto';
+        customRegion = null;
+        regionBox.classList.remove('visible');
+        regionClearBtn.classList.add('hidden');
+        regionInfo.classList.add('hidden');
+        regionSelectionActive = false;
+        regionOverlay.classList.remove('active');
+        regionSelectBtn.classList.remove('bg-amber-50', 'border-amber-300', 'text-amber-700', 'dark:bg-amber-900/30', 'dark:border-amber-700', 'dark:text-amber-300');
+    });
+
+    // Reprocess button
+    reprocessBtn.addEventListener('click', async () => {
+        if (!currentItem) return;
+        showLoading(i18n.t('loading.text'));
+        try {
+            await processSingle(currentItem, { ...getCurrentAdvancedOptions(), skipScroll: true });
+        } finally {
+            hideLoading();
+        }
+    });
+
+    // Region selection
+    regionSelectBtn.addEventListener('click', () => {
+        regionSelectionActive = !regionSelectionActive;
+        if (regionSelectionActive) {
+            regionOverlay.classList.add('active');
+            regionSelectBtn.classList.add('bg-amber-50', 'border-amber-300', 'text-amber-700', 'dark:bg-amber-900/30', 'dark:border-amber-700', 'dark:text-amber-300');
+        } else {
+            regionOverlay.classList.remove('active');
+            regionSelectBtn.classList.remove('bg-amber-50', 'border-amber-300', 'text-amber-700', 'dark:bg-amber-900/30', 'dark:border-amber-700', 'dark:text-amber-300');
+        }
+    });
+
+    regionClearBtn.addEventListener('click', () => {
+        customRegion = null;
+        regionBox.classList.remove('visible');
+        regionBox.style.width = '0';
+        regionBox.style.height = '0';
+        regionClearBtn.classList.add('hidden');
+        regionInfo.classList.add('hidden');
+    });
+
+    setupRegionDrawing();
+}
+
+function setupRegionDrawing() {
+    let startX = 0;
+    let startY = 0;
+    let drawing = false;
+
+    const getImageCoords = (clientX, clientY) => {
+        const imgRect = originalImage.getBoundingClientRect();
+        const overlayRect = regionOverlay.getBoundingClientRect();
+        // regionOverlay is positioned on the comparisonContainer which matches originalImage size
+        // Map the display coords back to natural image coords
+        const displayX = clientX - imgRect.left;
+        const displayY = clientY - imgRect.top;
+        const scaleX = originalImage.naturalWidth / imgRect.width;
+        const scaleY = originalImage.naturalHeight / imgRect.height;
+        return {
+            overlayX: clientX - overlayRect.left,
+            overlayY: clientY - overlayRect.top,
+            imageX: Math.round(displayX * scaleX),
+            imageY: Math.round(displayY * scaleY),
+            scaleX,
+            scaleY
+        };
+    };
+
+    const onDown = (e) => {
+        if (!regionSelectionActive) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const point = e.touches ? e.touches[0] : e;
+        const { overlayX, overlayY } = getImageCoords(point.clientX, point.clientY);
+        startX = overlayX;
+        startY = overlayY;
+        drawing = true;
+        regionBox.style.left = `${startX}px`;
+        regionBox.style.top = `${startY}px`;
+        regionBox.style.width = '0';
+        regionBox.style.height = '0';
+        regionBox.classList.add('visible');
+    };
+
+    const onMove = (e) => {
+        if (!drawing) return;
+        e.preventDefault();
+        const point = e.touches ? e.touches[0] : e;
+        const { overlayX, overlayY } = getImageCoords(point.clientX, point.clientY);
+        const x = Math.min(startX, overlayX);
+        const y = Math.min(startY, overlayY);
+        const w = Math.abs(overlayX - startX);
+        const h = Math.abs(overlayY - startY);
+        // Force square (watermarks are square)
+        const size = Math.max(w, h);
+        regionBox.style.left = `${x}px`;
+        regionBox.style.top = `${y}px`;
+        regionBox.style.width = `${size}px`;
+        regionBox.style.height = `${size}px`;
+    };
+
+    const onUp = (e) => {
+        if (!drawing) return;
+        drawing = false;
+        // Convert overlay box to image coordinates
+        const imgRect = originalImage.getBoundingClientRect();
+        const overlayRect = regionOverlay.getBoundingClientRect();
+        const boxLeft = parseFloat(regionBox.style.left);
+        const boxTop = parseFloat(regionBox.style.top);
+        const boxSize = parseFloat(regionBox.style.width);
+
+        if (boxSize < 8) {
+            regionBox.classList.remove('visible');
+            return;
+        }
+
+        const scaleX = originalImage.naturalWidth / imgRect.width;
+        const scaleY = originalImage.naturalHeight / imgRect.height;
+        // Overlay is same size as image in this layout
+        const imgX = Math.round(boxLeft * scaleX);
+        const imgY = Math.round(boxTop * scaleY);
+        const imgSize = Math.round(boxSize * scaleX);
+
+        customRegion = {
+            x: Math.max(0, imgX),
+            y: Math.max(0, imgY),
+            width: imgSize,
+            height: imgSize
+        };
+        regionClearBtn.classList.remove('hidden');
+        regionInfo.textContent = `(${customRegion.x},${customRegion.y}) ${customRegion.width}×${customRegion.height}`;
+        regionInfo.classList.remove('hidden');
+
+        // Auto-disable selection mode after drawing
+        regionSelectionActive = false;
+        regionOverlay.classList.remove('active');
+        regionSelectBtn.classList.remove('bg-amber-50', 'border-amber-300', 'text-amber-700', 'dark:bg-amber-900/30', 'dark:border-amber-700', 'dark:text-amber-300');
+    };
+
+    regionOverlay.addEventListener('mousedown', onDown);
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    regionOverlay.addEventListener('touchstart', onDown, { passive: false });
+    window.addEventListener('touchmove', onMove, { passive: false });
+    window.addEventListener('touchend', onUp);
 }
 
 function createImageCard(item) {
@@ -474,7 +727,14 @@ function updateDynamicTexts() {
 
         if (item?.processedBlob) {
             renderSingleProcessedMeta(item);
+            renderDetectionInfo(item);
         }
+    }
+
+    // Update advanced panel dynamic labels
+    if (resetAdvancedBtn) resetAdvancedBtn.title = i18n.t('advanced.resetDefaults');
+    if (alphaGainSlider && Number(alphaGainSlider.value) === 0) {
+        alphaGainValue.textContent = i18n.t('advanced.alphaGain.auto');
     }
 }
 

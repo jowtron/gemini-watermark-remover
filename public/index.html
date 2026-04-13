@@ -78,6 +78,56 @@
     .medium-zoom-overlay {
       backdrop-filter: blur(4px);
     }
+
+    /* Custom region selection overlay */
+    #regionOverlay {
+      position: absolute;
+      top: 0; left: 0; right: 0; bottom: 0;
+      z-index: 25;
+      cursor: crosshair;
+      display: none;
+    }
+    #regionOverlay.active { display: block; }
+    #regionBox {
+      position: absolute;
+      border: 2px dashed #f59e0b;
+      background: rgba(245, 158, 11, 0.15);
+      pointer-events: none;
+      display: none;
+    }
+    #regionBox.visible { display: block; }
+
+    /* Slider range styling */
+    input[type="range"] {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 100%;
+      height: 6px;
+      border-radius: 3px;
+      background: #e5e7eb;
+      outline: none;
+    }
+    .dark input[type="range"] { background: #374151; }
+    input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: #10B981;
+      cursor: pointer;
+      border: 2px solid white;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+    }
+    input[type="range"]::-moz-range-thumb {
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: #10B981;
+      cursor: pointer;
+      border: 2px solid white;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+    }
   </style>
 </head>
 <body class="bg-white dark:bg-gray-900 text-gray-800 dark:text-gray-100 antialiased selection:bg-primary selection:text-white flex flex-col min-h-screen loading transition-colors duration-200">
@@ -174,6 +224,11 @@
                              <img id="processedImage" class="block h-full max-w-none object-contain object-right-bottom" draggable="false" />
                         </div>
 
+                        <!-- Custom region selection overlay -->
+                        <div id="regionOverlay">
+                          <div id="regionBox"></div>
+                        </div>
+
                         <!-- Slider Handle -->
                         <div id="sliderHandle" class="absolute top-0 bottom-0 w-10 -ml-5 z-20 cursor-col-resize flex items-center justify-center group-hover:opacity-100 transition-opacity" style="left: 50%; display: none;">
                             <div class="w-1 h-full bg-white/50 backdrop-blur-[2px]"></div>
@@ -212,6 +267,82 @@
             </div>
 
             <div id="statusMessage" class="mt-6 text-sm text-gray-500 dark:text-gray-400 min-h-[1.25rem]"></div>
+
+            <!-- Advanced Settings (collapsible) -->
+            <div class="mt-6 border-t border-gray-100 dark:border-gray-700 pt-4">
+              <button id="advancedToggle" class="w-full flex items-center justify-between text-sm font-semibold text-gray-700 dark:text-gray-300 hover:text-primary transition-colors">
+                <span data-i18n="advanced.title">Advanced Settings</span>
+                <svg id="advancedChevron" class="w-4 h-4 transition-transform duration-200" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+              </button>
+
+              <div id="advancedPanel" class="hidden mt-4 space-y-5">
+                <!-- Alpha Gain -->
+                <div>
+                  <div class="flex items-center justify-between mb-1.5">
+                    <label class="text-xs font-medium text-gray-600 dark:text-gray-400" data-i18n="advanced.alphaGain">Alpha Gain</label>
+                    <span id="alphaGainValue" class="text-xs font-mono text-primary">Auto</span>
+                  </div>
+                  <input type="range" id="alphaGainSlider" min="0" max="3" step="0.05" value="0" />
+                  <div class="flex justify-between text-[10px] text-gray-400 mt-0.5">
+                    <span data-i18n="advanced.alphaGain.auto">Auto</span>
+                    <span>3.0</span>
+                  </div>
+                </div>
+
+                <!-- Max Passes -->
+                <div>
+                  <div class="flex items-center justify-between mb-1.5">
+                    <label class="text-xs font-medium text-gray-600 dark:text-gray-400" data-i18n="advanced.maxPasses">Max Passes</label>
+                    <span id="maxPassesValue" class="text-xs font-mono text-primary">4</span>
+                  </div>
+                  <input type="range" id="maxPassesSlider" min="1" max="8" step="1" value="4" />
+                  <div class="flex justify-between text-[10px] text-gray-400 mt-0.5">
+                    <span>1</span>
+                    <span>8</span>
+                  </div>
+                </div>
+
+                <!-- Adaptive Mode -->
+                <div>
+                  <div class="flex items-center justify-between mb-1.5">
+                    <label class="text-xs font-medium text-gray-600 dark:text-gray-400" data-i18n="advanced.adaptiveMode">Detection Mode</label>
+                  </div>
+                  <select id="adaptiveModeSelect" class="w-full px-3 py-2 text-sm border border-gray-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-700 dark:text-gray-200">
+                    <option value="auto" data-i18n="advanced.adaptiveMode.auto">Auto</option>
+                    <option value="off" data-i18n="advanced.adaptiveMode.off">Off (Standard Only)</option>
+                  </select>
+                </div>
+
+                <!-- Custom Region -->
+                <div>
+                  <div class="flex items-center justify-between mb-1.5">
+                    <label class="text-xs font-medium text-gray-600 dark:text-gray-400" data-i18n="advanced.customRegion">Custom Region</label>
+                  </div>
+                  <div class="flex gap-2">
+                    <button id="regionSelectBtn" class="flex-1 py-2 px-3 text-xs border border-gray-200 dark:border-gray-600 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors text-gray-600 dark:text-gray-300" data-i18n="advanced.customRegion.hint">Click &amp; drag on image</button>
+                    <button id="regionClearBtn" class="py-2 px-3 text-xs border border-gray-200 dark:border-gray-600 rounded-lg hover:bg-red-50 dark:hover:bg-red-900/20 hover:border-red-300 dark:hover:border-red-700 transition-colors text-gray-500 dark:text-gray-400 hidden" data-i18n="advanced.customRegion.clear">Clear</button>
+                  </div>
+                  <div id="regionInfo" class="text-[10px] text-gray-400 mt-1 hidden"></div>
+                </div>
+
+                <!-- Re-process + Reset Buttons -->
+                <div class="flex gap-2">
+                  <button id="reprocessBtn" class="flex-1 py-3 px-4 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-medium transition-all flex items-center justify-center gap-2 hidden">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
+                    <span data-i18n="advanced.reprocess">Re-process</span>
+                  </button>
+                  <button id="resetAdvancedBtn" class="py-3 px-3 bg-white dark:bg-gray-700 border border-gray-200 dark:border-gray-600 text-gray-600 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-600 rounded-xl text-xs font-medium transition-all" title="Reset to defaults">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 4v6h6M21 20v-6h-6M3.51 15A9 9 0 0021 9M20.49 9A9 9 0 003 15"></path></svg>
+                  </button>
+                </div>
+
+                <!-- Detection Info -->
+                <div id="detectionInfo" class="hidden">
+                  <h5 class="text-xs font-semibold text-gray-600 dark:text-gray-400 mb-2" data-i18n="advanced.detection">Detection Info</h5>
+                  <div id="detectionDetails" class="text-[11px] text-gray-500 dark:text-gray-400 space-y-1 font-mono bg-gray-50 dark:bg-gray-900 rounded-lg p-3"></div>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       </div>
